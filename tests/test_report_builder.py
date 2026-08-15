@@ -139,6 +139,15 @@ def test_language_is_recorded_on_the_model():
     assert build(language="ru").language == "ru"
 
 
+def test_anomaly_series_names_are_translated():
+    """Anomaly detection labels series in English; the report must not repeat that."""
+    russian = build(language="ru").anomalies
+    english = build(language="en").anomalies
+
+    assert russian.rows[0][1] == "Выручка"
+    assert english.rows[0][1] == "Revenue"
+
+
 # Shape guarantees every writer relies on.
 
 

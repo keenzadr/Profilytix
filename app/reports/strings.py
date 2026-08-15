@@ -159,6 +159,17 @@ LABELS: dict[str, dict[str, str]] = {
 }
 
 
+# Anomaly detection labels its series in English for the UI. Reports translate
+# them from the series key instead, so a Russian report does not say
+# "spike in Expenses".
+SERIES_LABEL_KEYS = {
+    "revenue": "header_revenue",
+    "expenses": "header_expenses",
+    "profit": "header_profit",
+    "amount": "header_amount",
+}
+
+
 def label(language: str, key: str) -> str:
     """Return one label, falling back to English and then to the key itself."""
     table = LABELS.get(language)
@@ -167,3 +178,11 @@ def label(language: str, key: str) -> str:
 
     fallback = LABELS[DEFAULT_LANGUAGE]
     return fallback.get(key, key)
+
+
+def series_label(language: str, series_key: str, fallback: str = "") -> str:
+    """Return a localised name for one financial series."""
+    label_key = SERIES_LABEL_KEYS.get(series_key)
+    if label_key is None:
+        return fallback or series_key
+    return label(language, label_key)

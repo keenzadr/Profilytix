@@ -15,7 +15,7 @@ from math import isfinite
 from app.analytics.metrics import BasicMetrics, format_money
 from app.analytics.time_series import TimeSeriesResult
 from app.ml.anomaly_detection import AnomalyDetectionResult
-from app.reports.strings import label
+from app.reports.strings import label, series_label
 
 
 MAX_INSIGHTS = 5
@@ -134,7 +134,7 @@ def _anomaly_summary(
         label(language, "insight_anomalies").format(
             count=anomalies.total_found,
             kind=label(language, kind_key),
-            series=strongest.series_label,
+            series=series_label(language, strongest.series_key, strongest.series_label),
             date=f"{strongest.period:%d.%m.%Y}",
         ),
     )

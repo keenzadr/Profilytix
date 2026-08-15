@@ -19,7 +19,7 @@ from app.ml.anomaly_detection import AnomalyDetectionResult
 from app.reports.chart_image import render_chart_png
 from app.reports.insights import generate_insights
 from app.reports.model import ReportModel, ReportSection, ReportTable
-from app.reports.strings import label
+from app.reports.strings import label, series_label
 
 
 DEPTH_BRIEF = "brief"
@@ -227,7 +227,7 @@ def _build_anomalies(
     rows = tuple(
         (
             f"{anomaly.period:{DATE_FORMAT}}",
-            anomaly.series_label,
+            series_label(language, anomaly.series_key, anomaly.series_label),
             label(language, "anomaly_drop" if anomaly.kind == "drop" else "anomaly_spike"),
             _money(anomaly.value, language),
             _money(anomaly.baseline, language),
