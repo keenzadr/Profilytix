@@ -66,6 +66,12 @@ from app.ml.anomaly_detection import (
     FinancialAnomaly,
     detect_financial_anomalies,
 )
+from app.reports.chart_image import (
+    CHART_SERIES_LABELS,
+    draw_anomaly_markers,
+    draw_time_series_chart as _draw_time_series_chart,
+    format_chart_axis_value as _format_chart_axis_value,
+)
 from app.services.analysis_loader import load_selected_columns
 from app.services.file_loader import (
     FileLoadError,
@@ -227,55 +233,11 @@ def _format_candidates(candidates: list[ColumnCandidate]) -> str:
     return ", ".join(formatted)
 
 
-CHART_SERIES_LABELS = {
-    "revenue": "Revenue",
-    "expenses": "Expenses",
-    "profit": "Profit",
-    "amount": "Amount",
-}
-
-
-def _format_chart_axis_value(value: float, _position: object = None) -> str:
-    """Format chart axis values with compact suffixes."""
-    if value == 0:
-        return "0"
-
-    sign = "-" if value < 0 else ""
-    absolute_value = abs(value)
-    for scale, suffix in (
-        (1_000_000_000, "b"),
-        (1_000_000, "m"),
-        (1_000, "k"),
-    ):
-        if absolute_value >= scale:
-            scaled = absolute_value / scale
-            text = f"{scaled:.1f}".rstrip("0").rstrip(".")
-            return f"{sign}{text}{suffix}"
-
-    if absolute_value >= 100:
-        return f"{value:.0f}"
-    return f"{value:.2f}".rstrip("0").rstrip(".")
-
-
 def _format_chart_hover_value(value: float) -> str:
     """Format exact values for chart hover labels."""
     if float(value).is_integer():
         return f"{value:,.0f}".replace(",", " ")
     return f"{value:,.2f}".replace(",", " ")
-
-
-def _format_chart_title(series_keys: tuple[str, ...], group_label: str) -> str:
-    """Build a chart title from visible series."""
-    labels = [CHART_SERIES_LABELS[key].lower() for key in series_keys]
-    if not labels:
-        return f"Selected values by {group_label}"
-    if len(labels) == 1:
-        series_text = labels[0].capitalize()
-    elif len(labels) == 2:
-        series_text = f"{labels[0].capitalize()} and {labels[1]}"
-    else:
-        series_text = f"{', '.join(labels[:-1]).capitalize()}, and {labels[-1]}"
-    return f"{series_text} by {group_label}"
 
 
 def _format_chart_period(value: object, grouping: str) -> str:
@@ -307,39 +269,6 @@ def _format_chart_tooltip(series_key: str, period: object, value: float, groupin
         f"Date: {_format_chart_period(period, grouping)}\n"
         f"{CHART_SERIES_LABELS[series_key]}: {_format_chart_hover_value(value)}"
     )
-
-
-def _draw_time_series_chart(axes: object, figure: object, time_series: TimeSeriesResult) -> list[tuple[object, str]]:
-    """Draw a time-series chart and return hoverable line metadata."""
-    periods = [point.period for point in time_series.points]
-    series_values = {
-        "revenue": [point.revenue for point in time_series.points],
-        "expenses": [point.expenses for point in time_series.points],
-        "profit": [point.profit for point in time_series.points],
-        "amount": [point.amount for point in time_series.points],
-    }
-
-    lines = []
-    axes.set_axis_on()
-    for series_key in time_series.visible_series:
-        (line,) = axes.plot(
-            periods,
-            series_values[series_key],
-            label=CHART_SERIES_LABELS[series_key],
-            linewidth=1.8,
-            solid_capstyle="round",
-        )
-        lines.append((line, series_key))
-
-    axes.grid(True, alpha=0.25)
-    axes.legend(loc="best")
-    if FuncFormatter is not None:
-        axes.yaxis.set_major_formatter(FuncFormatter(_format_chart_axis_value))
-        axes.yaxis.get_offset_text().set_visible(False)
-    group_label = TIME_GROUPINGS[time_series.grouping].lower()
-    axes.set_title(_format_chart_title(time_series.visible_series, group_label))
-    figure.autofmt_xdate()
-    return lines
 
 
 def _create_chart_hover_state(
@@ -511,9 +440,15 @@ def _hide_chart_hover(state: ChartHoverState) -> None:
 class ChartDialog(QDialog):
     """Fullscreen chart viewer."""
 
-    def __init__(self, time_series: TimeSeriesResult, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        time_series: TimeSeriesResult,
+        anomalies: AnomalyDetectionResult | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.time_series = time_series
+        self.anomalies = anomalies
         self.motion_connection: int | None = None
         self.hover_state: ChartHoverState | None = None
         self.setWindowTitle("Charts")
@@ -538,6 +473,7 @@ class ChartDialog(QDialog):
         self.canvas = FigureCanvas(self.figure)
         self.axes.clear()
         chart_lines = _draw_time_series_chart(self.axes, self.figure, self.time_series)
+        draw_anomaly_markers(self.axes, self.time_series, self.anomalies)
         self.hover_state = _create_chart_hover_state(
             self.canvas,
             self.axes,
@@ -969,6 +905,7 @@ class MainWindow(QMainWindow):
         self.current_metrics_text = ""
         self.current_time_series = None
         self.current_anomalies = None
+        self.current_anomalies = None
         self._update_file_info(loaded_file)
         self._update_table_preview(loaded_file.column_names, loaded_file.preview_rows)
         self._update_detected_columns(loaded_file)
@@ -1193,6 +1130,7 @@ class MainWindow(QMainWindow):
             self.chart_figure,
             time_series,
         )
+        draw_anomaly_markers(self.chart_axes, time_series, self.current_anomalies)
         self.current_time_series = time_series
         self._connect_chart_tooltip(chart_lines, time_series.grouping)
         self.open_chart_button.setEnabled(True)
@@ -1236,7 +1174,7 @@ class MainWindow(QMainWindow):
         if self.current_time_series is None:
             return
 
-        dialog = ChartDialog(self.current_time_series, self)
+        dialog = ChartDialog(self.current_time_series, self.current_anomalies, self)
         dialog.exec()
 
     def _update_detected_columns(self, loaded_file: LoadedFile) -> None:
