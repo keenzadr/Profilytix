@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QThread, Qt, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -66,12 +67,15 @@ from app.ml.anomaly_detection import (
     FinancialAnomaly,
     detect_financial_anomalies,
 )
+from app.reports.builder import ReportRequest, build_report
 from app.reports.chart_image import (
     CHART_SERIES_LABELS,
     draw_anomaly_markers,
     draw_time_series_chart as _draw_time_series_chart,
     format_chart_axis_value as _format_chart_axis_value,
 )
+from app.reports.writers import WRITERS, ReportExportError, write_report
+from app.ui.export_dialog import ExportDialog, ExportOptions
 from app.services.analysis_loader import load_selected_columns
 from app.services.file_loader import (
     FileLoadError,
@@ -187,6 +191,64 @@ class AnalysisWorker(QObject):
                     anomalies=anomalies,
                 )
             )
+        finally:
+            self.finished.emit()
+
+
+class ExportWorker(QObject):
+    """Build and write a report outside the UI thread.
+
+    A detailed workbook over a long period takes long enough to freeze the
+    window, so this follows the same pattern as preview and analysis loading.
+    """
+
+    completed = Signal(str)
+    failed = Signal(str)
+    status_changed = Signal(str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        target_path: Path,
+        options: ExportOptions,
+        result: AnalysisResult,
+        file_name: str,
+    ) -> None:
+        super().__init__()
+        self.target_path = target_path
+        self.options = options
+        self.result = result
+        self.file_name = file_name
+
+    @Slot()
+    def run(self) -> None:
+        """Assemble the report model and hand it to the chosen writer."""
+        try:
+            self.status_changed.emit(f"Exporting {self.target_path.name}...")
+            request = ReportRequest(
+                file_name=self.file_name,
+                depth=self.options.depth,
+                language=self.options.language,
+                grouping=self.result.time_series.grouping,
+            )
+            model = build_report(
+                self.result.metrics,
+                self.result.time_series,
+                self.result.anomalies,
+                request,
+            )
+            write_report(model, self.target_path, self.options.format_key)
+        except ReportExportError as error:
+            self.failed.emit(str(error))
+        except OSError as error:
+            self.failed.emit(
+                f"Could not write {self.target_path.name}. "
+                f"Close it in other applications and try again. ({error})"
+            )
+        except Exception as error:
+            self.failed.emit(f"Unexpected error while exporting the report: {error}")
+        else:
+            self.completed.emit(str(self.target_path))
         finally:
             self.finished.emit()
 
@@ -692,6 +754,11 @@ class MainWindow(QMainWindow):
         self.preview_worker: FilePreviewWorker | None = None
         self.analysis_thread: QThread | None = None
         self.analysis_worker: AnalysisWorker | None = None
+        self.export_thread: QThread | None = None
+        self.export_worker: ExportWorker | None = None
+        self.current_analysis_result: AnalysisResult | None = None
+        self.last_export_path: Path | None = None
+        self.last_export_options: ExportOptions | None = None
         self.current_loaded_file: LoadedFile | None = None
         self.available_column_names: list[str] = []
         self.selected_columns = SelectedColumns()
@@ -914,6 +981,9 @@ class MainWindow(QMainWindow):
         self.current_metrics_text = ""
         self.current_time_series = None
         self.current_anomalies = None
+        self.current_analysis_result = None
+        self.export_button.hide()
+        self.open_report_folder_button.hide()
         self.current_anomalies = None
         self._update_file_info(loaded_file)
         self._update_table_preview(loaded_file.column_names, loaded_file.preview_rows)
@@ -1013,6 +1083,14 @@ class MainWindow(QMainWindow):
         self.analyze_button.setEnabled(False)
         self.analyze_button.clicked.connect(self._start_analysis)
 
+        self.export_button = QPushButton("Export Report...")
+        self.export_button.clicked.connect(self._start_export)
+        self.export_button.hide()
+
+        self.open_report_folder_button = QPushButton("Open Folder")
+        self.open_report_folder_button.clicked.connect(self._open_report_folder)
+        self.open_report_folder_button.hide()
+
         layout.addWidget(self.detected_columns_title_label)
         layout.addWidget(self.detection_warning_label)
         layout.addWidget(self.detected_columns_label)
@@ -1025,6 +1103,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(anomalies_title_label)
         layout.addWidget(self.anomalies_label)
         layout.addStretch()
+        layout.addWidget(self.export_button)
+        layout.addWidget(self.open_report_folder_button)
         layout.addWidget(self.analyze_button)
 
         return frame
@@ -1285,6 +1365,95 @@ class MainWindow(QMainWindow):
 
         self.analysis_thread.start()
 
+    def _start_export(self) -> None:
+        """Ask for export options and write the report in the background."""
+        if self.export_thread is not None or self.current_analysis_result is None:
+            return
+        if self.current_loaded_file is None:
+            return
+
+        result = self.current_analysis_result
+        has_chart = bool(result.time_series.points and result.time_series.visible_series)
+
+        dialog = ExportDialog(self, has_chart=has_chart, initial=self.last_export_options)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        options = dialog.options()
+        report_format = WRITERS[options.format_key]
+        source_path = Path(self.current_loaded_file.path)
+        suggested = source_path.with_name(
+            f"{source_path.stem}_report{report_format.extension}"
+        )
+
+        target_text, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Report",
+            str(suggested),
+            report_format.file_filter,
+        )
+        if not target_text:
+            return
+
+        target_path = Path(target_text)
+        if target_path.suffix.lower() != report_format.extension:
+            target_path = target_path.with_suffix(report_format.extension)
+
+        self.last_export_options = options
+        self._set_export_state(True)
+
+        self.export_thread = QThread(self)
+        self.export_worker = ExportWorker(
+            target_path,
+            options,
+            result,
+            source_path.name,
+        )
+        self.export_worker.moveToThread(self.export_thread)
+
+        self.export_thread.started.connect(self.export_worker.run)
+        self.export_worker.status_changed.connect(self.status_label.setText)
+        self.export_worker.completed.connect(self._handle_export_completed)
+        self.export_worker.failed.connect(self._handle_export_failed)
+        self.export_worker.finished.connect(self.export_thread.quit)
+        self.export_worker.finished.connect(self.export_worker.deleteLater)
+        self.export_thread.finished.connect(self.export_thread.deleteLater)
+        self.export_thread.finished.connect(self._finish_export)
+
+        self.export_thread.start()
+
+    def _set_export_state(self, is_running: bool) -> None:
+        """Show that an export is in progress."""
+        self.export_button.setEnabled(not is_running)
+        self.export_button.setText("Exporting..." if is_running else "Export Report...")
+        if is_running:
+            self.open_report_folder_button.hide()
+
+    def _finish_export(self) -> None:
+        """Release the export thread."""
+        self.export_thread = None
+        self.export_worker = None
+        self._set_export_state(False)
+
+    def _handle_export_completed(self, target_path: str) -> None:
+        """Report a written file and offer to reveal it."""
+        self.last_export_path = Path(target_path)
+        self.status_label.setText(f"Report saved to {target_path}")
+        self.open_report_folder_button.show()
+
+    def _handle_export_failed(self, message: str) -> None:
+        """Report an export failure without taking the window down."""
+        self.status_label.setText("Export failed.")
+        self.open_report_folder_button.hide()
+        QMessageBox.warning(self, "Export failed", message)
+
+    def _open_report_folder(self) -> None:
+        """Open the folder holding the most recent report."""
+        if self.last_export_path is None:
+            return
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.last_export_path.parent)))
+
     def _get_selected_columns(self) -> SelectedColumns:
         """Return currently selected columns."""
         return self.selected_columns
@@ -1320,6 +1489,7 @@ class MainWindow(QMainWindow):
         """Display calculated metrics."""
         self.current_metrics = result.metrics
         self.current_anomalies = result.anomalies
+        self.current_analysis_result = result
         self.current_metrics_text = self._format_analysis_details(
             result.metrics,
             result.anomalies,
@@ -1330,6 +1500,7 @@ class MainWindow(QMainWindow):
             self._format_anomalies_compact(result.anomalies, result.time_series.grouping)
         )
         self.metrics_details_button.show()
+        self.export_button.show()
         self._set_detected_columns_visible(False)
         self._update_chart(result.time_series)
         self.status_label.setText("Analysis complete.")
@@ -1339,6 +1510,9 @@ class MainWindow(QMainWindow):
         self.metrics_label.setText("Analysis failed.")
         self.anomalies_label.setText("Anomaly detection failed.")
         self.metrics_details_button.hide()
+        self.export_button.hide()
+        self.open_report_folder_button.hide()
+        self.current_analysis_result = None
         self.status_label.setText("Analysis failed.")
         self._show_load_error(message)
 
