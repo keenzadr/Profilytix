@@ -38,6 +38,8 @@ ANOMALY_SPIKE_MARKER = "v"
 ANOMALY_DROP_MARKER = "^"
 ANOMALY_LEGEND_LABEL = "Anomaly"
 
+FORECAST_LEGEND_LABEL = "Forecast"
+
 EXPORT_WIDTH_INCHES = 10.0
 EXPORT_HEIGHT_INCHES = 4.5
 EXPORT_DPI = 150
@@ -164,9 +166,61 @@ def draw_anomaly_markers(
     return added
 
 
+def draw_forecast(
+    axes: object,
+    time_series: TimeSeriesResult,
+    forecast: object | None,
+    chart_lines: list[tuple[object, str]],
+) -> int:
+    """Draw each forecast as a dashed continuation of its own series.
+
+    The dashed segment starts at the last observed point, so the projection
+    visibly grows out of the data instead of floating beside it. Returns how
+    many series were extended.
+    """
+    if forecast is None or not getattr(forecast, "has_forecast", False):
+        return 0
+    if not time_series.points:
+        return 0
+
+    colors_by_series = {series_key: line.get_color() for line, series_key in chart_lines}
+    last_point = time_series.points[-1]
+    added = 0
+
+    for series_key in time_series.visible_series:
+        series_forecast = forecast.for_series(series_key)
+        if series_forecast is None or not series_forecast.points:
+            continue
+
+        periods = [last_point.period] + [point.period for point in series_forecast.points]
+        values = [float(getattr(last_point, series_key))] + [
+            point.value for point in series_forecast.points
+        ]
+
+        axes.plot(
+            periods,
+            values,
+            linestyle="--",
+            linewidth=1.5,
+            color=colors_by_series.get(series_key, "#888888"),
+            alpha=0.85,
+            label=FORECAST_LEGEND_LABEL if added == 0 else None,
+            zorder=3,
+        )
+        added += 1
+
+    if added:
+        axes.relim()
+        axes.autoscale_view()
+        axes.legend(loc="best")
+
+    return added
+
+
 def render_chart_png(
     time_series: TimeSeriesResult,
     anomalies: AnomalyDetectionResult | None = None,
+    forecast: object | None = None,
     width_in: float = EXPORT_WIDTH_INCHES,
     height_in: float = EXPORT_HEIGHT_INCHES,
     dpi: int = EXPORT_DPI,
@@ -181,7 +235,8 @@ def render_chart_png(
     FigureCanvasAgg(figure)
     axes = figure.add_subplot(111)
 
-    draw_time_series_chart(axes, figure, time_series)
+    chart_lines = draw_time_series_chart(axes, figure, time_series)
+    draw_forecast(axes, time_series, forecast, chart_lines)
     draw_anomaly_markers(axes, time_series, anomalies)
 
     buffer = BytesIO()

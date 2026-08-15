@@ -241,6 +241,46 @@ def test_amount_only_analysis_reports_amount_instead_of_profit():
     assert "Profit" not in labels
 
 
+def test_forecast_table_is_absent_without_a_forecast():
+    assert build().forecast is None
+
+
+def test_forecast_table_lists_every_projected_series():
+    from app.ml.forecasting import forecast_time_series
+
+    series = make_series(8)
+    forecast = forecast_time_series(series, periods_ahead=2)
+    model = build_report(
+        make_metrics(),
+        series,
+        make_anomalies(2),
+        make_request(language="ru"),
+        forecast,
+    )
+
+    assert model.forecast is not None
+    assert len(model.forecast.rows) == len(forecast.forecasts)
+    assert model.forecast.title == "Прогноз"
+    # Indicator, two projected periods, and the method.
+    assert len(model.forecast.headers) == 4
+    assert model.forecast in model.tables()
+
+
+def test_forecast_adds_an_insight():
+    from app.ml.forecasting import forecast_time_series
+
+    series = make_series(8)
+    model = build_report(
+        make_metrics(),
+        series,
+        make_anomalies(1),
+        make_request(language="en"),
+        forecast_time_series(series),
+    )
+
+    assert any("forecast" in text.lower() for text in model.insights)
+
+
 def test_title_and_generation_time_are_present():
     model = build()
 

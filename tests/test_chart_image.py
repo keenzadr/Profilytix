@@ -136,6 +136,62 @@ def test_markers_do_not_move_axis_limits():
     assert (axes.get_xlim(), axes.get_ylim()) == limits_before
 
 
+def test_forecast_is_drawn_as_a_dashed_continuation():
+    from app.ml.forecasting import forecast_time_series
+    from app.reports.chart_image import draw_forecast
+
+    figure = Figure()
+    axes = figure.add_subplot(111)
+    series = make_series(8)
+    chart_lines = draw_time_series_chart(axes, figure, series)
+
+    added = draw_forecast(axes, series, forecast_time_series(series), chart_lines)
+
+    assert added == len(series.visible_series)
+    dashed = [line for line in axes.lines if line.get_linestyle() == "--"]
+    assert len(dashed) == added
+
+
+def test_forecast_line_matches_its_series_colour():
+    from app.ml.forecasting import forecast_time_series
+    from app.reports.chart_image import draw_forecast
+
+    figure = Figure()
+    axes = figure.add_subplot(111)
+    series = make_series(8)
+    chart_lines = draw_time_series_chart(axes, figure, series)
+    colours = {key: line.get_color() for line, key in chart_lines}
+
+    draw_forecast(axes, series, forecast_time_series(series), chart_lines)
+
+    dashed_colours = {line.get_color() for line in axes.lines if line.get_linestyle() == "--"}
+    assert dashed_colours == set(colours.values())
+
+
+def test_drawing_no_forecast_changes_nothing():
+    from app.reports.chart_image import draw_forecast
+
+    figure = Figure()
+    axes = figure.add_subplot(111)
+    series = make_series()
+    chart_lines = draw_time_series_chart(axes, figure, series)
+    before = len(axes.lines)
+
+    assert draw_forecast(axes, series, None, chart_lines) == 0
+    assert len(axes.lines) == before
+
+
+def test_render_includes_a_forecast_when_given_one():
+    from app.ml.forecasting import forecast_time_series
+
+    series = make_series(8)
+    with_forecast = render_chart_png(series, None, forecast_time_series(series))
+    without = render_chart_png(series, None, None)
+
+    assert with_forecast is not None
+    assert with_forecast != without
+
+
 def test_axis_values_use_compact_suffixes():
     assert format_chart_axis_value(0) == "0"
     assert format_chart_axis_value(1_500) == "1.5k"

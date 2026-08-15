@@ -57,6 +57,7 @@ class ReportModel:
     chart_png: bytes | None
     language: str
     depth: str
+    forecast: ReportTable | None = None
 
     @property
     def has_chart(self) -> bool:
@@ -64,6 +65,9 @@ class ReportModel:
         return bool(self.chart_png)
 
     def tables(self) -> tuple[ReportTable, ...]:
-        """Return the present, non-empty tables in display order."""
-        candidates = (self.categories, self.anomalies, self.periods)
+        """Return the present, non-empty tables in display order.
+
+        Every writer walks this, so a table added here reaches all five formats.
+        """
+        candidates = (self.forecast, self.categories, self.anomalies, self.periods)
         return tuple(table for table in candidates if table is not None and not table.is_empty)

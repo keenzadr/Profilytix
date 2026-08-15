@@ -90,9 +90,9 @@ other way round, which is what lets every part of report generation be tested wi
 - Writes the report in Russian or English, chosen at export time.
 - Adds short rule-based insights, including a daily burn rate and a cash gap warning.
 - Runs the export in a background worker, so a large detailed workbook does not freeze the window.
+- Forecasts each visible series a few periods ahead and draws it as a dashed continuation.
+- Chooses between a moving average and a linear trend per series, and declines to forecast from fewer than six periods.
 - Keeps service, analytics, ML, report, and utility packages ready for the next small steps.
-
-Forecasting is intentionally not implemented yet.
 
 ## Report Contents
 
@@ -102,6 +102,7 @@ Forecasting is intentionally not implemented yet.
 | Metrics | key figures | all figures |
 | Insights | yes | yes |
 | Chart | yes | yes |
+| Forecast | yes | yes |
 | Categories | top 5 | all |
 | Anomalies | top 8 | all found |
 | Per-period table | no | yes |
@@ -142,5 +143,5 @@ python -m pytest tests -q
 
 ## Next Step
 
-Add revenue and expense forecasting: a moving average and a linear trend drawn as a dashed
-continuation of the chart, plus a forecast section in the report.
+Add cancel and real progress reporting for long-running analysis, then packaging through
+PyInstaller and Inno Setup.

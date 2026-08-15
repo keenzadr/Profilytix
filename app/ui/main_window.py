@@ -67,10 +67,12 @@ from app.ml.anomaly_detection import (
     FinancialAnomaly,
     detect_financial_anomalies,
 )
+from app.ml.forecasting import ForecastResult, forecast_time_series
 from app.reports.builder import ReportRequest, build_report
 from app.reports.chart_image import (
     CHART_SERIES_LABELS,
     draw_anomaly_markers,
+    draw_forecast,
     draw_time_series_chart as _draw_time_series_chart,
     format_chart_axis_value as _format_chart_axis_value,
 )
@@ -98,6 +100,7 @@ class AnalysisResult:
     metrics: BasicMetrics
     time_series: TimeSeriesResult
     anomalies: AnomalyDetectionResult
+    forecast: ForecastResult | None = None
 
 
 @dataclass
@@ -179,6 +182,7 @@ class AnalysisWorker(QObject):
             )
             time_series = calculate_time_series(prepared, self.grouping, self.week_start)
             anomalies = detect_financial_anomalies(time_series)
+            forecast = forecast_time_series(time_series)
         except FileLoadError as error:
             self.failed.emit(str(error))
         except Exception as error:
@@ -189,6 +193,7 @@ class AnalysisWorker(QObject):
                     metrics=metrics,
                     time_series=time_series,
                     anomalies=anomalies,
+                    forecast=forecast,
                 )
             )
         finally:
@@ -236,6 +241,7 @@ class ExportWorker(QObject):
                 self.result.time_series,
                 self.result.anomalies,
                 request,
+                self.result.forecast,
             )
             write_report(model, self.target_path, self.options.format_key)
         except ReportExportError as error:
@@ -515,11 +521,13 @@ class ChartDialog(QDialog):
         self,
         time_series: TimeSeriesResult,
         anomalies: AnomalyDetectionResult | None = None,
+        forecast: ForecastResult | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.time_series = time_series
         self.anomalies = anomalies
+        self.forecast = forecast
         self.motion_connection: int | None = None
         self.hover_state: ChartHoverState | None = None
         self.setWindowTitle("Charts")
@@ -544,6 +552,7 @@ class ChartDialog(QDialog):
         self.canvas = FigureCanvas(self.figure)
         self.axes.clear()
         chart_lines = _draw_time_series_chart(self.axes, self.figure, self.time_series)
+        draw_forecast(self.axes, self.time_series, self.forecast, chart_lines)
         draw_anomaly_markers(self.axes, self.time_series, self.anomalies)
         self.hover_state = _create_chart_hover_state(
             self.canvas,
@@ -771,6 +780,7 @@ class MainWindow(QMainWindow):
         self.current_metrics_text = ""
         self.current_time_series: TimeSeriesResult | None = None
         self.current_anomalies: AnomalyDetectionResult | None = None
+        self.current_forecast: ForecastResult | None = None
         self.setWindowTitle("Profilytix")
         self.resize(1000, 700)
 
@@ -981,6 +991,7 @@ class MainWindow(QMainWindow):
         self.current_metrics_text = ""
         self.current_time_series = None
         self.current_anomalies = None
+        self.current_forecast = None
         self.current_analysis_result = None
         self.export_button.hide()
         self.open_report_folder_button.hide()
@@ -1219,6 +1230,7 @@ class MainWindow(QMainWindow):
             self.chart_figure,
             time_series,
         )
+        draw_forecast(self.chart_axes, time_series, self.current_forecast, chart_lines)
         draw_anomaly_markers(self.chart_axes, time_series, self.current_anomalies)
         self.current_time_series = time_series
         self._connect_chart_tooltip(chart_lines, time_series.grouping)
@@ -1263,7 +1275,12 @@ class MainWindow(QMainWindow):
         if self.current_time_series is None:
             return
 
-        dialog = ChartDialog(self.current_time_series, self.current_anomalies, self)
+        dialog = ChartDialog(
+            self.current_time_series,
+            self.current_anomalies,
+            self.current_forecast,
+            self,
+        )
         dialog.exec()
 
     def _update_detected_columns(self, loaded_file: LoadedFile) -> None:
@@ -1489,6 +1506,7 @@ class MainWindow(QMainWindow):
         """Display calculated metrics."""
         self.current_metrics = result.metrics
         self.current_anomalies = result.anomalies
+        self.current_forecast = result.forecast
         self.current_analysis_result = result
         self.current_metrics_text = self._format_analysis_details(
             result.metrics,

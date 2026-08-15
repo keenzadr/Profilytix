@@ -24,6 +24,7 @@ LABELS: dict[str, dict[str, str]] = {
         "section_anomalies": "Аномалии",
         "section_periods": "Динамика по периодам",
         "section_chart": "График",
+        "section_forecast": "Прогноз",
         # Source rows
         "source_file": "Файл",
         "source_period": "Период",
@@ -79,6 +80,10 @@ LABELS: dict[str, dict[str, str]] = {
         "insight_anomalies": "Найдено необычных периодов: {count}. Самый заметный — {kind} по показателю «{series}» {date}.",
         "insight_burn_rate": "Средний расход составляет {value} в день.",
         "insight_cash_gap": "Средний день закрывается в минус на {value}. При таком темпе есть риск кассового разрыва.",
+        "insight_forecast": "Прогноз на следующий период: {series} около {value}.",
+        "forecast_method_linear_trend": "линейный тренд",
+        "forecast_method_moving_average": "скользящее среднее",
+        "header_method": "Метод",
         # Fallbacks
         "not_available": "нет данных",
         "no_insights": "Недостаточно данных для выводов.",
@@ -96,6 +101,7 @@ LABELS: dict[str, dict[str, str]] = {
         "section_anomalies": "Anomalies",
         "section_periods": "Periods",
         "section_chart": "Chart",
+        "section_forecast": "Forecast",
         # Source rows
         "source_file": "File",
         "source_period": "Period",
@@ -151,6 +157,10 @@ LABELS: dict[str, dict[str, str]] = {
         "insight_anomalies": "Unusual periods found: {count}. The most notable is a {kind} in {series} on {date}.",
         "insight_burn_rate": "Average expense runs at {value} per day.",
         "insight_cash_gap": "The average day closes {value} short. At this rate there is a cash gap risk.",
+        "insight_forecast": "Next period forecast: {series} around {value}.",
+        "forecast_method_linear_trend": "linear trend",
+        "forecast_method_moving_average": "moving average",
+        "header_method": "Method",
         # Fallbacks
         "not_available": "not available",
         "no_insights": "Not enough data for insights.",

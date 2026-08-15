@@ -16,6 +16,7 @@ from datetime import datetime
 from app.analytics.metrics import BasicMetrics, format_money, format_number
 from app.analytics.time_series import TIME_GROUPINGS, TimeSeriesResult
 from app.ml.anomaly_detection import AnomalyDetectionResult
+from app.ml.forecasting import ForecastResult
 from app.reports.chart_image import render_chart_png
 from app.reports.insights import generate_insights
 from app.reports.model import ReportModel, ReportSection, ReportTable
@@ -53,6 +54,7 @@ def build_report(
     time_series: TimeSeriesResult,
     anomalies: AnomalyDetectionResult,
     request: ReportRequest,
+    forecast: ForecastResult | None = None,
 ) -> ReportModel:
     """Turn analysis results into a model every writer can lay out."""
     language = request.language
@@ -62,13 +64,45 @@ def build_report(
         generated_at=datetime.now(),
         source=_build_source(metrics, request),
         summary=_build_summary(metrics, request),
-        insights=generate_insights(metrics, time_series, anomalies, language),
+        insights=generate_insights(metrics, time_series, anomalies, language, forecast),
         categories=_build_categories(metrics, request),
         anomalies=_build_anomalies(anomalies, request),
         periods=_build_periods(time_series, request) if request.is_detailed else None,
-        chart_png=_build_chart(time_series, anomalies, request),
+        forecast=_build_forecast(forecast, request),
+        chart_png=_build_chart(time_series, anomalies, forecast, request),
         language=language,
         depth=request.depth,
+    )
+
+
+def _build_forecast(
+    forecast: ForecastResult | None,
+    request: ReportRequest,
+) -> ReportTable | None:
+    """Build the projection table, or nothing when nothing could be projected."""
+    if forecast is None or not forecast.has_forecast:
+        return None
+
+    language = request.language
+    periods = forecast.future_periods()
+    if not periods:
+        return None
+
+    headers = [label(language, "header_indicator")]
+    headers.extend(f"{period:{DATE_FORMAT}}" for period in periods)
+    headers.append(label(language, "header_method"))
+
+    rows = []
+    for series in forecast.forecasts:
+        row = [series_label(language, series.series_key)]
+        row.extend(_money(point.value, language) for point in series.points)
+        row.append(label(language, f"forecast_method_{series.method}"))
+        rows.append(tuple(row))
+
+    return ReportTable(
+        title=label(language, "section_forecast"),
+        headers=tuple(headers),
+        rows=tuple(rows),
     )
 
 
@@ -294,12 +328,13 @@ def _build_periods(
 def _build_chart(
     time_series: TimeSeriesResult,
     anomalies: AnomalyDetectionResult,
+    forecast: ForecastResult | None,
     request: ReportRequest,
 ) -> bytes | None:
     """Render the chart image, unless the caller asked to skip it."""
     if not request.include_chart:
         return None
-    return render_chart_png(time_series, anomalies)
+    return render_chart_png(time_series, anomalies, forecast)
 
 
 def _build_period_text(value: datetime | None) -> str:

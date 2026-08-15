@@ -18,7 +18,7 @@ from app.ml.anomaly_detection import AnomalyDetectionResult
 from app.reports.strings import label, series_label
 
 
-MAX_INSIGHTS = 5
+MAX_INSIGHTS = 6
 
 # A category share below this is unremarkable and not worth a sentence.
 MIN_CATEGORY_SHARE = 25.0
@@ -32,6 +32,7 @@ def generate_insights(
     time_series: TimeSeriesResult,
     anomalies: AnomalyDetectionResult,
     language: str,
+    forecast: object | None = None,
 ) -> tuple[str, ...]:
     """Return short observations about the analysis, most useful first."""
     collected: list[str] = []
@@ -44,7 +45,40 @@ def generate_insights(
     ):
         collected.extend(rule(metrics, time_series, anomalies, language))
 
+    collected.extend(_forecast_summary(time_series, forecast, language))
     return tuple(collected[:MAX_INSIGHTS])
+
+
+def _forecast_summary(
+    time_series: TimeSeriesResult,
+    forecast: object | None,
+    language: str,
+) -> tuple[str, ...]:
+    """Report the next projected value for the most telling series."""
+    if forecast is None or not getattr(forecast, "has_forecast", False):
+        return ()
+
+    # Profit is what an owner actually asks about; fall back to whatever is shown.
+    preferred = ("profit", "amount", "revenue")
+    for series_key in preferred:
+        if series_key not in time_series.visible_series:
+            continue
+        series_forecast = forecast.for_series(series_key)
+        if series_forecast is None or not series_forecast.points:
+            continue
+
+        value = series_forecast.points[0].value
+        if not isfinite(value):
+            return ()
+
+        return (
+            label(language, "insight_forecast").format(
+                series=series_label(language, series_key),
+                value=format_money(value),
+            ),
+        )
+
+    return ()
 
 
 def _last_period_change(

@@ -74,10 +74,12 @@ Implemented:
 - Rule-based insight sentences, including daily burn rate and a cash gap warning.
 - Export runs in a background `QThread` worker with success and failure reporting.
 - `Open Folder` button after a successful export.
+- Forecasting for every visible series: moving average or linear trend, whichever scores better.
+- Forecast drawn as a dashed continuation in the embedded chart, the fullscreen dialog, and exports.
+- Forecast table and a forecast insight sentence in reports.
 
 Not implemented yet:
 
-- forecasting;
 - cancellation for long-running analysis;
 - true `loaded MB / total MB` progress;
 - full-table virtual scrolling/viewing;
@@ -165,6 +167,10 @@ requirements.txt
 - Reports translate series names from `series_key` rather than reusing `FinancialAnomaly.series_label`, which is English for the UI. Without this a Russian report reads "spike in Expenses".
 - Analysis requests a wider category breakdown (`ANALYSIS_CATEGORY_LIMIT`) than the panel shows, because a detailed report wants the full list; the panel slices back to five.
 - CSV export is a stacked document with blocks of differing width, not a rectangle. It uses `;` and a UTF-8 BOM so Excel on Russian Windows opens it correctly by double-click. Read it with the `csv` module, not `pandas.read_csv`.
+- Forecasting scores the moving average and the linear trend over the same periods. Scoring the line over the whole range and the average over its tail would compare two different questions, because the average cannot predict the first few points at all.
+- The line is only chosen when it beats the average by `TREND_ADVANTAGE`. A free slope always fits noise slightly better, and telling a small business its revenue is trending steeply when the data does not support that is worse than reporting a flat level.
+- `ReportModel.tables()` is what every writer walks, so a table added there reaches all five formats at once. The forecast table was added that way and needed no writer changes.
+- Forecasting refuses below `MIN_POINTS_FOR_FORECAST` (six periods). Note that five months of data grouped by month falls under this and correctly produces no forecast; grouping by week gives 22 points and does.
 
 ## 4. Project Constraints To Remember
 
@@ -194,14 +200,13 @@ Important process rule:
 
 Recommended next task:
 
-1. Forecasting. `app/ml/forecasting.py` with a moving average and a least-squares linear
-   trend, refusing to forecast with fewer than six points, drawn as a dashed continuation of
-   each series in `chart_image.py` and added as a report section in `builder.py`.
+1. Cancel and real progress for long-running analysis. Preview, analysis, and export all run
+   in `QThread` workers already, but none can be stopped once started.
 
 After that:
 
-2. Category-aware anomaly summaries.
-3. Cancel and real progress for long-running analysis.
+2. Show the forecast in the main window panel, not only on the chart and in reports.
+3. Category-aware anomaly summaries.
 4. Saved reusable column-mapping profiles.
 5. Packaging through PyInstaller and Inno Setup.
 
@@ -420,22 +425,23 @@ The current app supports:
 - interactive charts with resizing, fullscreen, grouping, readable axis labels, dynamic legend, and snap hover labels;
 - simple IQR/Z-score anomaly detection with compact and detailed UI output, and markers on the chart;
 - report export to PDF, XLSX, HTML, PNG, and CSV, at brief or detailed depth, in Russian or English;
-- rule-based insights including burn rate and a cash gap warning.
+- rule-based insights including burn rate and a cash gap warning;
+- forecasting drawn on the chart and included in reports.
 
 All seven MVP success criteria from `PROJECT_CONTEXT.md` are met.
-
-The next meaningful feature is forecasting.
 
 ## Verification Status
 
 Verified on 2026-08-15 with Python 3.12.10 in `.venv`:
 
-- `python -m pytest tests -q` - 86 passed.
+- `python -m pytest tests -q` - 105 passed.
 - `python -m compileall app -q` - no errors.
 - All five formats exported from `transactions_sample.csv` at both depths in both languages,
   20 files, all non-empty.
 - PDF text extracted and checked: Cyrillic renders correctly, series names are translated,
   no mid-word wrapping.
+- Chart images inspected: anomaly markers land on the planted anomalies, and forecast lines
+  continue each series in its own colour without disturbing the axis range.
 - `Financial Distress.csv` loads, flags uncertainty, and exports without crashing.
 
 Not yet done by hand: clicking through the running application. The window builds under the
