@@ -205,28 +205,30 @@ The MVP is feature-complete: every success criterion in `PROJECT_CONTEXT.md` is 
 binding constraint is no longer features. It is that nobody outside this repository has run
 the application, and that the interface has never been clicked.
 
-Recommended order:
+The agreed plan is in `docs/superpowers/plans/2026-08-16-next-sessions.md`. In short:
 
-1. **Work through `docs/MANUAL_TESTING.md` and fix what it finds.** Mandatory before anything
-   else. Packaging or extending software that no human has operated compounds unknown defects.
-2. **Translate the application UI to Russian.** Reports are already bilingual; the window is
-   English only. `PROJECT_CONTEXT.md` targets Russian-speaking small business owners in a
-   tenge market, so an English interface blocks the first real user session outright. The
-   label-table pattern in `app/reports/strings.py` extends to the UI directly.
-3. **Package with PyInstaller, then Inno Setup.** Required for anyone to run this without a
-   Python toolchain. Expect friction: PySide6, matplotlib, polars and scikit-learn together
-   produce a large bundle with hidden-import problems.
-4. **Put it in front of three to five real small business owners and watch.** Everything below
-   this line is a guess until that happens.
+**Session A**, about 3.5 hours, ends with something a stranger can use:
+
+1. **The founder works through `docs/MANUAL_TESTING.md`.** An agent cannot click a desktop
+   window; this step cannot be delegated. Best done before the session opens.
+2. **Fix what the pass found.**
+3. **Translate the interface to Russian**, reusing the label-table pattern from
+   `app/reports/strings.py`, defaulting to Russian, with the choice stored in `QSettings`.
+4. **Rule-based transaction categorisation**, ML Phase 2 in `PROJECT_CONTEXT.md`. This fills a
+   real gap rather than guessing: a file with no category column currently produces no
+   category breakdown at all.
+
+**Session B**, about 2 hours, ends with something shippable: PyInstaller, Inno Setup, and then
+three to five real small business owners in front of it.
 
 Deferred, and deliberately so:
 
 - Cancel and real progress for long-running analysis.
 - Forecast shown in the main window panel, not only on the chart and in reports.
-- Transaction categorisation, ML Phase 2 in `PROJECT_CONTEXT.md`. Rule-based first. Which
-  rules matter cannot be known before seeing real customer files.
 - Category-aware anomaly summaries.
 - Saved reusable column-mapping profiles.
+- Supervised categorisation with CatBoost or LightGBM, once rule-based output can be measured
+  against real labelled files.
 
 Also open, small and specific: a CSV exported from pandas carries an unnamed index column.
 `load_file_preview()` surfaces it as `''`, the column dialog offers it as a blank selectable
