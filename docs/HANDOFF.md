@@ -1,6 +1,6 @@
 # Profilytix Handoff
 
-Last updated: 2026-08-15
+Last updated: 2026-08-16
 
 ## 1. What Is Implemented
 
@@ -201,17 +201,40 @@ Important process rule:
 
 ## 5. Suggested Next Tasks
 
-Recommended next task:
+The MVP is feature-complete: every success criterion in `PROJECT_CONTEXT.md` is met. The
+binding constraint is no longer features. It is that nobody outside this repository has run
+the application, and that the interface has never been clicked.
 
-1. Cancel and real progress for long-running analysis. Preview, analysis, and export all run
-   in `QThread` workers already, but none can be stopped once started.
+Recommended order:
 
-After that:
+1. **Work through `docs/MANUAL_TESTING.md` and fix what it finds.** Mandatory before anything
+   else. Packaging or extending software that no human has operated compounds unknown defects.
+2. **Translate the application UI to Russian.** Reports are already bilingual; the window is
+   English only. `PROJECT_CONTEXT.md` targets Russian-speaking small business owners in a
+   tenge market, so an English interface blocks the first real user session outright. The
+   label-table pattern in `app/reports/strings.py` extends to the UI directly.
+3. **Package with PyInstaller, then Inno Setup.** Required for anyone to run this without a
+   Python toolchain. Expect friction: PySide6, matplotlib, polars and scikit-learn together
+   produce a large bundle with hidden-import problems.
+4. **Put it in front of three to five real small business owners and watch.** Everything below
+   this line is a guess until that happens.
 
-2. Show the forecast in the main window panel, not only on the chart and in reports.
-3. Category-aware anomaly summaries.
-4. Saved reusable column-mapping profiles.
-5. Packaging through PyInstaller and Inno Setup.
+Deferred, and deliberately so:
+
+- Cancel and real progress for long-running analysis.
+- Forecast shown in the main window panel, not only on the chart and in reports.
+- Transaction categorisation, ML Phase 2 in `PROJECT_CONTEXT.md`. Rule-based first. Which
+  rules matter cannot be known before seeing real customer files.
+- Category-aware anomaly summaries.
+- Saved reusable column-mapping profiles.
+
+Also open, small and specific: a CSV exported from pandas carries an unnamed index column.
+`load_file_preview()` surfaces it as `''`, the column dialog offers it as a blank selectable
+entry, and choosing it does nothing because `_normalize_selected_columns()` drops empty names.
+Nothing breaks; the list simply contains a decoy. `app/services/file_loader.py` already
+generates `Column N` names for headerless files, and that path should cover a single blank
+header cell too. Watch the indexed renaming in `analysis_loader.py`, which has misaligned
+columns before.
 
 ## 6. Problems Already Seen And Fixes
 
@@ -356,6 +379,7 @@ Must read fully before continuing:
 1. `PROJECT_CONTEXT.md`
 2. `AGENTS.md`
 3. `docs/HANDOFF.md`
+4. `docs/MANUAL_TESTING.md` - what has never been checked by hand
 
 Then read the relevant implementation files:
 
@@ -492,5 +516,17 @@ Verified on 2026-08-15 with Python 3.12.10 in `.venv`:
   continue each series in its own colour without disturbing the axis range.
 - `Financial Distress.csv` loads, flags uncertainty, and exports without crashing.
 
-Not yet done by hand: clicking through the running application. The window builds under the
-offscreen Qt platform in `tests/test_export_ui.py`, but a human has not driven the real UI.
+### Not Verified
+
+Nobody has driven the real interface. `tests/test_export_ui.py` builds the window under the
+offscreen Qt platform and exercises the dialog and the export worker for real, but no human
+has clicked anything.
+
+One specific open question: on 2026-08-15 the application was started in the background. The
+process ran and exited with code 0, printing nothing — no traceback, no warning. That is what
+closing a window looks like, and also what an immediate exit looks like. Whether the window
+actually appeared is unconfirmed.
+
+`docs/MANUAL_TESTING.md` holds the checklist, with expected numbers for every step. Those
+numbers were produced programmatically on this code, so a mismatch points at the UI layer
+rather than at the analysis.

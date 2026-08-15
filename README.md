@@ -143,7 +143,11 @@ python scripts/make_sample_data.py
 python -m pytest tests -q
 ```
 
+The suite covers analysis, the report layer, and the export dialog and worker. The running
+interface has not been checked by hand. `docs/MANUAL_TESTING.md` lists what to click and the
+numbers to expect.
+
 ## Next Step
 
-Add cancel and real progress reporting for long-running analysis, then packaging through
-PyInstaller and Inno Setup.
+Work through `docs/MANUAL_TESTING.md`, then translate the interface to Russian and package the
+application, so it can be put in front of real users.
