@@ -81,6 +81,12 @@ from app.services.file_loader import (
 )
 
 
+# Analysis keeps a wider category breakdown than the panel shows, because a
+# detailed exported report wants the full list.
+ANALYSIS_CATEGORY_LIMIT = 25
+UI_CATEGORY_LIMIT = 5
+
+
 @dataclass(frozen=True)
 class AnalysisResult:
     """Metrics and chart data calculated for a file."""
@@ -163,7 +169,10 @@ class AnalysisWorker(QObject):
             self.status_changed.emit(f"Analyzing {path.name}...")
             data = load_selected_columns(path, self.selected_columns)
             prepared = prepare_financial_data(data, self.selected_columns)
-            metrics = calculate_basic_metrics_from_prepared(prepared)
+            metrics = calculate_basic_metrics_from_prepared(
+                prepared,
+                category_limit=ANALYSIS_CATEGORY_LIMIT,
+            )
             time_series = calculate_time_series(prepared, self.grouping, self.week_start)
             anomalies = detect_financial_anomalies(time_series)
         except FileLoadError as error:
@@ -1414,7 +1423,7 @@ class MainWindow(QMainWindow):
         if metrics.top_categories:
             lines.append("")
             lines.append("Top categories by profit:")
-            for category in metrics.top_categories:
+            for category in metrics.top_categories[:UI_CATEGORY_LIMIT]:
                 lines.append(
                     f"{category.name}: {format_money(category.profit)} "
                     f"({format_number(category.transaction_count)} tx)"

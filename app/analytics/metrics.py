@@ -124,8 +124,13 @@ def prepare_financial_data(
 
 def calculate_basic_metrics_from_prepared(
     prepared: PreparedFinancialData,
+    category_limit: int = 5,
 ) -> BasicMetrics:
-    """Calculate basic metrics from already cleaned financial data."""
+    """Calculate basic metrics from already cleaned financial data.
+
+    `category_limit` caps the category breakdown. The compact UI shows only the
+    first few, but a detailed report wants the full list, so the caller decides.
+    """
     total_revenue = float(prepared.revenue.sum()) if prepared.revenue is not None else None
     total_expenses = (
         float(prepared.expenses.sum()) if prepared.expenses is not None else None
@@ -150,7 +155,7 @@ def calculate_basic_metrics_from_prepared(
         category_column_count=prepared.category_column_count,
         date_min=date_min,
         date_max=date_max,
-        top_categories=_calculate_top_categories(prepared),
+        top_categories=_calculate_top_categories(prepared, category_limit),
     )
 
 
