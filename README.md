@@ -64,6 +64,8 @@ other way round, which is what lets every part of report generation be tested wi
 - Shows a loading status and busy progress indicator while preview is being read.
 - Shows the first 100 rows in a table preview.
 - Detects likely date, revenue, expense, amount, and category columns from headers and preview values.
+- Understands camelCase headers such as `TotalPrice` and `ShippingCost`, and recognises real-world category names such as `Region`, `Product`, and `Филиал`.
+- Asks for confirmation whenever a money column was picked from its values rather than its name.
 - Handles files without a clear header row by assigning generic `Column 1`, `Column 2`, etc.
 - Marks generic headers like `col1`, `Column 1`, `Unnamed: 0`, or numeric headers as uncertain.
 - Shows money and direction candidates when revenue/expense cannot be detected safely.

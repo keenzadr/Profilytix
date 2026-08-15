@@ -19,6 +19,9 @@ Implemented:
 - Excel preview uses `openpyxl` read-only mode for `.xlsx` and pandas for `.xls`.
 - CSV encoding detection supports `utf-8`, `utf-8-sig`, and `cp1251`.
 - Automatic column detection for `Date`, `Revenue`, `Expenses`, `Amount`, and `Category`.
+- camelCase headers are split before matching, so `TotalPrice` and `ShippingCost` are understood.
+- Category detection covers real-world dimension names (region, product, store, филиал, ...) and can also select a column from its values alone.
+- Confirmation is requested whenever a money column was chosen on value shape without header support.
 - Generic header support through `Column 1`, `Column 2`, etc.
 - Weak/generic header warning.
 - Money/direction/category candidate hints with reasons.
@@ -403,6 +406,48 @@ Fix:
 - `_column_widths()` in `pdf_writer.py` shares width equally once a table reaches five
   columns, and cells drop to 8pt at six.
 
+### Autodetect Was Confidently Wrong On English Sales Files
+
+Problem:
+
+- On a realistic sales export (`Date, Region, Product, Quantity, UnitPrice, ..., TotalPrice,
+  ShippingCost, ...`) the detector chose `UnitPrice` as the money column, found no category,
+  and set `needs_user_confirmation` to `False`. A user who clicked Analyze without opening
+  `Configure Columns...` saw 448 240.42 where the real revenue was 4 379 992.43, with no
+  warning. Wrong by 10x, stated confidently.
+
+Root cause:
+
+- `normalize_text()` split on `_ - / \ | : ; . ,` and brackets but not on camelCase, so
+  `TotalPrice` normalized to `totalprice`, in which no keyword list can find `total`. Every
+  English camelCase header was invisible to every dictionary in the module.
+
+Four fixes, all in `app/analytics/column_detection.py` unless noted:
+
+- `normalize_text()` splits camelCase and acronym boundaries before folding case.
+- `_score_column()` scores the `amount` role before the keyword shortcut. The shortcut
+  returned early at a 0.75 keyword score, so a well-named money column ranked *below* an
+  unnamed numeric one that reached 0.85 on values alone. Having a meaningful name lowered a
+  column's score.
+- Revenue and expense roles now reject a keyword hit when the column holds text, capping it
+  at `NON_MONEY_KEYWORD_CEILING`. Without this, `PaymentMethod` became an expense because it
+  matches `payment`, while containing Card and Cash. The check uses the numeric ratio only,
+  not `_score_money_values()`, because the stricter heuristic rejects integer-only columns as
+  identifier-like and a revenue column of round thousands looks exactly like that.
+- `needs_user_confirmation` is `True` whenever a money role rests on value shape with no
+  header support, detected via `KEYWORD_REASON_MARKER`.
+
+Category detection also gained real-world names (region, product, store, branch, manager,
+регион, товар, филиал, ...) and graded value evidence: `_score_category_values()` returned a
+flat 0.55 while the category threshold is 0.7, so evidence from values alone could never
+select anything.
+
+Follow-on bug this exposed, in `app/analytics/time_series.py`:
+
+- `_visible_chart_series()` decided visibility from selected-column counts. A signed amount
+  feeds its positive values into revenue, so with `amount` plus a named expense the chart
+  showed only shipping costs and hid 4.38 M of revenue. Visibility now follows the values.
+
 ### Report CSV Is Not A Rectangle
 
 Problem:
@@ -434,7 +479,10 @@ All seven MVP success criteria from `PROJECT_CONTEXT.md` are met.
 
 Verified on 2026-08-15 with Python 3.12.10 in `.venv`:
 
-- `python -m pytest tests -q` - 105 passed.
+- `python -m pytest tests -q` - 132 passed.
+- Autodetect on `Product-Sales-Region.xlsx` now produces the same numbers as careful manual
+  mapping: revenue 4 379 992.43, expenses 41 260.94, category by Region, 30 monthly points,
+  2 anomalies, 3 forecast series.
 - `python -m compileall app -q` - no errors.
 - All five formats exported from `transactions_sample.csv` at both depths in both languages,
   20 files, all non-empty.

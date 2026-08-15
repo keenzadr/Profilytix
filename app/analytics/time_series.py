@@ -136,14 +136,27 @@ def _visible_chart_series(
     grouped: pd.DataFrame,
     prepared: PreparedFinancialData,
 ) -> tuple[str, ...]:
-    """Return series that should be visible on the chart."""
+    """Return series that should be visible on the chart.
+
+    A signed amount column feeds its positive values into revenue and its
+    negative ones into expenses, so those series can carry data even when no
+    revenue or expense column was selected by name. Visibility therefore follows
+    the values, not the column counts: checking counts alone once hid millions in
+    revenue behind a chart of shipping costs.
+    """
     if prepared.amount_column_count and not prepared.revenue_column_count and not prepared.expense_column_count:
         return ("amount",)
 
+    money_selected = (
+        prepared.revenue_column_count
+        or prepared.expense_column_count
+        or prepared.amount_column_count
+    )
+
     visible = []
-    if prepared.revenue_column_count and _has_nonzero_values(grouped["revenue"]):
+    if money_selected and _has_nonzero_values(grouped["revenue"]):
         visible.append("revenue")
-    if prepared.expense_column_count and _has_nonzero_values(grouped["expenses"]):
+    if money_selected and _has_nonzero_values(grouped["expenses"]):
         visible.append("expenses")
     if len(visible) >= 2 and _has_nonzero_values(grouped["profit"]):
         visible.append("profit")

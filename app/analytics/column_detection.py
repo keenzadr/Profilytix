@@ -7,6 +7,24 @@ from dataclasses import dataclass
 
 
 COLUMN_ROLES = ("date", "revenue", "expense", "amount", "category")
+
+# A revenue/expense keyword hit on a column holding text is capped below every
+# auto-select threshold, so it stays a suggestion rather than a decision.
+NON_MONEY_KEYWORD_CEILING = 0.5
+
+# Below this share of parseable numbers, a column is text no matter what its
+# header promises.
+MIN_NUMERIC_RATIO_FOR_MONEY = 0.5
+
+# Value evidence strong enough to name a category on its own.
+CATEGORY_STRONG_MIN_TEXT_RATIO = 0.9
+CATEGORY_STRONG_MAX_UNIQUE = 12
+CATEGORY_STRONG_MAX_UNIQUE_RATIO = 0.5
+
+# Every keyword-derived reason contains this word, and no value-derived reason
+# does. It is how a match made on values alone is told apart from one the header
+# actually supports.
+KEYWORD_REASON_MARKER = "keyword"
 AUTO_SELECT_THRESHOLDS = {
     "date": 0.6,
     "revenue": 0.7,
@@ -249,6 +267,53 @@ CATEGORY_KEYWORDS = (
     "категория дохода",
     "санат",
     "түрі",
+    # Real files rarely have a column literally called "category". They organise
+    # money by what was sold, where, and by whom.
+    "region",
+    "product",
+    "service",
+    "item",
+    "store",
+    "shop",
+    "branch",
+    "location",
+    "channel",
+    "brand",
+    "vendor",
+    "supplier",
+    "manager",
+    "salesperson",
+    "seller",
+    "customer type",
+    "client type",
+    "payment method",
+    "division",
+    "unit",
+    "source",
+    "status",
+    "регион",
+    "район",
+    "область",
+    "город",
+    "товар",
+    "продукт",
+    "услуга",
+    "номенклатура",
+    "магазин",
+    "филиал",
+    "точка",
+    "склад",
+    "направление",
+    "канал",
+    "бренд",
+    "поставщик",
+    "менеджер",
+    "продавец",
+    "клиент",
+    "подразделение",
+    "источник",
+    "способ оплаты",
+    "статус",
 )
 
 GENERIC_AMOUNT_KEYWORDS = (
@@ -548,12 +613,19 @@ def detect_columns(
 
     money_candidates = _candidates_from_scores(money_scores)
     direction_candidates = _candidates_from_scores(direction_scores)
-    has_money_match = any(
-        matches[role].column_name is not None for role in ("revenue", "expense", "amount")
+    money_roles = ("revenue", "expense", "amount")
+    has_money_match = any(matches[role].column_name is not None for role in money_roles)
+
+    # A money column chosen purely because its values look numeric is a guess.
+    # This is a financial tool: confidently wrong is worse than asking.
+    money_rests_on_values_alone = any(
+        _match_lacks_keyword_support(matches[role]) for role in money_roles
     )
+
     needs_user_confirmation = (
         weak_headers
         or not has_money_match
+        or money_rests_on_values_alone
         or any(
             matches[role].column_name is not None and matches[role].confidence < 0.8
             for role in COLUMN_ROLES
@@ -575,11 +647,26 @@ def detect_columns(
 
 
 def normalize_text(value: str) -> str:
-    """Normalize header text for keyword matching."""
-    text = value.casefold().replace("ё", "е")
+    """Normalize header text for keyword matching.
+
+    camelCase is split before folding case. Most English spreadsheet headers are
+    written that way, and without the split `TotalPrice` normalizes to
+    `totalprice`, in which no keyword list can find the word `total`. That one
+    omission made the detector rank a per-unit price above a transaction total.
+    """
+    text = _split_camel_case(value)
+    text = text.casefold().replace("ё", "е")
     text = re.sub(r"[_\-/\\|:;.,()\[\]{}]+", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def _split_camel_case(value: str) -> str:
+    """Insert spaces at camelCase and acronym boundaries."""
+    # lowercase or digit followed by an uppercase letter: TotalPrice, Q1Sales.
+    text = re.sub(r"(?<=[a-zа-яё0-9])(?=[A-ZА-ЯЁ])", " ", value)
+    # end of an acronym run before a capitalised word: TOTALPrice, VATAmount.
+    return re.sub(r"(?<=[A-ZА-ЯЁ])(?=[A-ZА-ЯЁ][a-zа-яё])", " ", text)
 
 
 def headers_are_weak(column_names: list[str]) -> bool:
@@ -618,6 +705,13 @@ def _auto_select_threshold(role: str, weak_headers: bool) -> float:
     return AUTO_SELECT_THRESHOLDS[role]
 
 
+def _match_lacks_keyword_support(match: ColumnMatch) -> bool:
+    """Return whether a filled match rests on value shape with no header support."""
+    if match.column_name is None:
+        return False
+    return KEYWORD_REASON_MARKER not in match.reason
+
+
 def _candidates_from_scores(scores: list[tuple[float, str, str]]) -> list[ColumnCandidate]:
     """Convert raw scores to sorted candidates."""
     candidates = [
@@ -631,6 +725,39 @@ def _candidates_from_scores(scores: list[tuple[float, str, str]]) -> list[Column
 def _score_column(role: str, normalized_name: str, values: list[str]) -> tuple[float, str]:
     """Score a column for a specific role."""
     keyword_score, keyword_reason = _score_keywords(normalized_name, ROLE_KEYWORDS[role])
+
+    if role == "amount":
+        # Scored before the keyword shortcut below, because a recognisable name
+        # must never cap a money column beneath an unnamed numeric one. With the
+        # shortcut, `TotalPrice` stopped at its 0.75 keyword score while
+        # `UnitPrice` reached 0.85 on values alone, and the per-unit price won.
+        amount_score, amount_reason = _score_money_candidate(normalized_name, values)
+        if amount_score > keyword_score:
+            return amount_score, amount_reason
+        return keyword_score, keyword_reason
+
+    if role in {"revenue", "expense"}:
+        # Only whether the column holds numbers at all is checked here. The
+        # stricter money heuristics reject integer-only columns as identifier
+        # like, and a revenue column of round thousands looks exactly like that.
+        profile = _money_value_profile(values)
+        if (
+            keyword_score > 0
+            and profile.checked_count
+            and profile.numeric_ratio < MIN_NUMERIC_RATIO_FOR_MONEY
+        ):
+            # A keyword hit on a column that holds text is a false positive:
+            # `PaymentMethod` matches "payment" but contains Card and Cash.
+            return (
+                min(keyword_score, NON_MONEY_KEYWORD_CEILING),
+                f"{keyword_reason}, but values are not money-like",
+            )
+        if keyword_score >= 0.7:
+            return keyword_score, keyword_reason
+        if keyword_score > 0 and _score_money_values(values) > 0:
+            return min(keyword_score + 0.1, 0.9), f"{keyword_reason}, money-like values"
+        return keyword_score, keyword_reason
+
     if keyword_score >= 0.7:
         return keyword_score, keyword_reason
 
@@ -638,16 +765,6 @@ def _score_column(role: str, normalized_name: str, values: list[str]) -> tuple[f
         date_score = _score_date_values(values)
         if date_score > keyword_score:
             return date_score, "date-like values"
-
-    if role in {"revenue", "expense"} and keyword_score > 0:
-        money_score = _score_money_values(values)
-        if money_score > 0:
-            return min(keyword_score + 0.1, 0.9), f"{keyword_reason}, money-like values"
-
-    if role == "amount":
-        amount_score, amount_reason = _score_money_candidate(normalized_name, values)
-        if amount_score > keyword_score:
-            return amount_score, amount_reason
 
     if role == "category":
         category_score = _score_category_values(values)
@@ -902,7 +1019,16 @@ def _score_direction_candidate(normalized_name: str, values: list[str]) -> tuple
 
 
 def _score_category_values(values: list[str]) -> float:
-    """Score category-like text values from preview rows."""
+    """Score category-like text values from preview rows.
+
+    Strong evidence reaches the auto-select threshold, because a short list of
+    repeated words next to a money column is a category whatever its header
+    says. Weaker evidence stays a suggestion.
+
+    Both an absolute cap and a ratio are required. The count alone would accept
+    eight distinct customer names from an eight-row preview; the ratio alone
+    would reject a real category as the preview grows.
+    """
     if len(values) < 5:
         return 0.0
 
@@ -914,6 +1040,13 @@ def _score_category_values(values: list[str]) -> float:
     unique_ratio = unique_count / len(checked_values)
     text_like_count = sum(not _looks_like_money(value) and not _looks_like_date(value) for value in checked_values)
     text_ratio = text_like_count / len(checked_values)
+
+    if (
+        text_ratio >= CATEGORY_STRONG_MIN_TEXT_RATIO
+        and unique_count <= CATEGORY_STRONG_MAX_UNIQUE
+        and unique_ratio <= CATEGORY_STRONG_MAX_UNIQUE_RATIO
+    ):
+        return 0.7
 
     if text_ratio >= 0.8 and unique_ratio <= 0.7:
         return 0.55
