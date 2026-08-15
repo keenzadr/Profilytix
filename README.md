@@ -2,7 +2,7 @@
 
 Profilytix is a local Windows desktop application for small business financial analytics.
 
-This repository currently contains a Python + PySide6 desktop application with fast Excel/CSV preview, column mapping, basic financial metrics, interactive charts, and simple anomaly detection.
+This repository currently contains a Python + PySide6 desktop application with fast Excel/CSV preview, column mapping, basic financial metrics, interactive charts, simple anomaly detection, and report export to PDF, Excel, HTML, PNG, and CSV.
 
 ## Requirements
 
@@ -28,15 +28,26 @@ app/
   main.py
   ui/
     main_window.py
+    export_dialog.py
   services/
   analytics/
   ml/
   reports/
+    model.py
+    strings.py
+    insights.py
+    builder.py
+    chart_image.py
+    writers/
   utils/
 docs/
 sample_data/
+scripts/
 tests/
 ```
+
+Nothing under `app/reports/` imports PySide6. The window imports the report layer, never the
+other way round, which is what lets every part of report generation be tested without a GUI.
 
 ## Current Scope
 
@@ -73,9 +84,39 @@ tests/
 - Shows chart hover markers by nearest vertical date position, with a vertical guide line, highlighted point, date label, and exact value label.
 - Detects simple anomalies on aggregated chart data with IQR and Z-score rules.
 - Shows a compact anomaly summary in the main window and detailed anomaly rows in `Show Details...`.
+- Marks detected anomalies on the chart: spikes with a downward triangle, drops with an upward one.
+- Exports a report through `Export Report...` in five formats: PDF, Excel, HTML, PNG, and CSV.
+- Offers two levels of detail: brief and detailed.
+- Writes the report in Russian or English, chosen at export time.
+- Adds short rule-based insights, including a daily burn rate and a cash gap warning.
+- Runs the export in a background worker, so a large detailed workbook does not freeze the window.
 - Keeps service, analytics, ML, report, and utility packages ready for the next small steps.
 
-Forecasting and PDF export are intentionally not implemented yet.
+Forecasting is intentionally not implemented yet.
+
+## Report Contents
+
+| Section | Brief | Detailed |
+|---|---|---|
+| File, period, transactions, grouping | yes | yes |
+| Metrics | key figures | all figures |
+| Insights | yes | yes |
+| Chart | yes | yes |
+| Categories | top 5 | all |
+| Anomalies | top 8 | all found |
+| Per-period table | no | yes |
+
+PDF export renders Cyrillic through the DejaVuSans font that ships inside matplotlib, so no
+font file is bundled and no download is needed.
+
+## Sample Data
+
+`sample_data/` is ignored by git. To generate a synthetic transactional file with Russian
+headers and three planted anomalies:
+
+```bash
+python scripts/make_sample_data.py
+```
 
 ## Manual Check
 
@@ -89,7 +130,17 @@ Forecasting and PDF export are intentionally not implemented yet.
 8. Confirm that compact metrics and a chart appear.
 9. Confirm that anomaly status appears in the right panel.
 10. Hover over the chart to see the nearest-period marker and value label.
+11. Confirm that detected anomalies carry red triangle markers on the chart.
+12. Click `Export Report...`, choose a format, detail level, and language, and save the file.
+13. Open the saved file and confirm the numbers match the panel.
+
+## Tests
+
+```bash
+python -m pytest tests -q
+```
 
 ## Next Step
 
-Add anomaly markers on the chart or start PDF export after metrics/charts/anomalies stabilize.
+Add revenue and expense forecasting: a moving average and a linear trend drawn as a dashed
+continuation of the chart, plus a forecast section in the report.

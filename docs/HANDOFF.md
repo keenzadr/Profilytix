@@ -1,6 +1,6 @@
 # Profilytix Handoff
 
-Last updated: 2026-06-30
+Last updated: 2026-08-15
 
 ## 1. What Is Implemented
 
@@ -67,16 +67,22 @@ Implemented:
   - profit/amount drops.
 - Compact anomaly section in the main UI.
 - Detailed anomaly rows in the `Show Details...` analysis dialog.
+- Anomaly markers on the chart, in the embedded view, the fullscreen dialog, and exports.
+- Report export in five formats: PDF, XLSX, HTML, PNG, CSV.
+- Two report depths: brief and detailed.
+- Report language selectable at export time: Russian or English.
+- Rule-based insight sentences, including daily burn rate and a cash gap warning.
+- Export runs in a background `QThread` worker with success and failure reporting.
+- `Open Folder` button after a successful export.
 
 Not implemented yet:
 
-- anomaly markers on charts;
 - forecasting;
-- PDF export;
 - cancellation for long-running analysis;
 - true `loaded MB / total MB` progress;
 - full-table virtual scrolling/viewing;
 - saved reusable column-mapping profiles;
+- application UI translation (only reports are bilingual);
 - packaging/installer.
 
 ## 2. Created Or Changed Files
@@ -91,8 +97,16 @@ Important files:
 - `app/analytics/metrics.py` - numeric/date cleaning, prepared series, metrics, category summaries.
 - `app/analytics/time_series.py` - time grouping and chart series selection.
 - `app/ml/anomaly_detection.py` - simple IQR/Z-score anomaly detection over aggregated chart series.
-- `tests/test_anomaly_detection.py` - focused anomaly detection tests.
-- `requirements.txt` - PySide6, pandas, polars, openpyxl, xlrd, scikit-learn, matplotlib.
+- `app/reports/model.py` - print-ready report structures.
+- `app/reports/strings.py` - Russian and English label tables, plus series name translation.
+- `app/reports/insights.py` - five formula-based insight rules.
+- `app/reports/builder.py` - turns analysis results into a `ReportModel` at a chosen depth and language.
+- `app/reports/chart_image.py` - shared chart drawing, anomaly markers, and PNG rendering.
+- `app/reports/writers/` - one module per export format behind a shared registry.
+- `app/ui/export_dialog.py` - format, depth, and language selection.
+- `scripts/make_sample_data.py` - generates a synthetic transactional CSV with planted anomalies.
+- `tests/` - anomaly detection, strings, insights, chart image, builder, writers, and export UI.
+- `requirements.txt` - PySide6, pandas, polars, openpyxl, xlrd, scikit-learn, matplotlib, reportlab.
 - `README.md` - setup, run, and current scope.
 - `AGENTS.md` - project rules and instruction-change rule.
 - `docs/HANDOFF.md` - this handoff document.
@@ -141,6 +155,16 @@ requirements.txt
 - Charts are Matplotlib inside PySide6, not Plotly/WebView.
 - Chart hover is implemented with Matplotlib artists, not Qt tooltips, so it can snap to the nearest vertical date position and show labels directly on the plot.
 - The UI is intentionally still simple: no database, no auth, no cloud, no LLM API.
+- Report generation lives in `app/reports/` and never imports PySide6. `main_window.py` imports the report layer, not the reverse. That is what allows every part of report generation to be unit tested without starting a GUI.
+- Chart drawing moved out of `main_window.py` into `app/reports/chart_image.py` and is imported back. The on-screen chart and the exported image therefore come from the same code and cannot drift apart.
+- `chart_image.py` uses `FigureCanvasAgg` directly rather than switching the global Matplotlib backend, so the Qt canvas keeps working while reports render off-screen.
+- `ReportModel` reaches a writer already print-ready: values are formatted strings in the target language and inapplicable sections are absent. Depth and language are resolved once in `builder.py` instead of five times.
+- Adding an export format costs one module plus one registry entry in `app/reports/writers/__init__.py`.
+- Writer modules carry a `_writer` suffix because `csv.py` and `html.py` would sit next to code importing the standard library modules of those names.
+- PDF uses ReportLab with `DejaVuSans.ttf` taken from `matplotlib.get_data_path()`. Matplotlib is already a dependency, so Cyrillic works with no vendored font and no network access. WeasyPrint and QtWebEngine were rejected: GTK dependencies and roughly 130 MB respectively, both bad for a future PyInstaller build.
+- Reports translate series names from `series_key` rather than reusing `FinancialAnomaly.series_label`, which is English for the UI. Without this a Russian report reads "spike in Expenses".
+- Analysis requests a wider category breakdown (`ANALYSIS_CATEGORY_LIMIT`) than the panel shows, because a detailed report wants the full list; the panel slices back to five.
+- CSV export is a stacked document with blocks of differing width, not a rectangle. It uses `;` and a UTF-8 BOM so Excel on Russian Windows opens it correctly by double-click. Read it with the `csv` module, not `pandas.read_csv`.
 
 ## 4. Project Constraints To Remember
 
@@ -168,16 +192,18 @@ Important process rule:
 
 ## 5. Suggested Next Tasks
 
-Recommended next small task:
+Recommended next task:
 
-1. Add anomaly markers on the chart.
+1. Forecasting. `app/ml/forecasting.py` with a moving average and a least-squares linear
+   trend, refusing to forecast with fewer than six points, drawn as a dashed continuation of
+   each series in `chart_image.py` and added as a report section in `builder.py`.
 
 After that:
 
-2. Add category-aware anomaly summaries.
-3. Add PDF export after metrics/charts/anomalies stabilize.
-4. Add cancel/progress for long-running analysis.
-5. Add packaging later through PyInstaller/Inno Setup.
+2. Category-aware anomaly summaries.
+3. Cancel and real progress for long-running analysis.
+4. Saved reusable column-mapping profiles.
+5. Packaging through PyInstaller and Inno Setup.
 
 ## 6. Problems Already Seen And Fixes
 
@@ -339,16 +365,49 @@ Useful commands:
 ```bash
 pip install -r requirements.txt
 python -m app.main
+python -m pytest tests -q
 python -m compileall app
+python scripts/make_sample_data.py
 ```
 
-Real local files used during manual testing, if they still exist:
+Test data:
 
-- `C:\Users\user\Desktop\transactions.csv`
-- `C:\Users\user\Desktop\eubs_email.csv`
-- `C:\Users\user\Desktop\emails_notify.xlsx`
+- `sample_data/transactions_sample.csv` is generated by `scripts/make_sample_data.py`. It has
+  Russian headers, six categories, and three planted anomalies at known dates, so detection
+  output can be checked against an expected answer.
+- `sample_data/Financial Distress.csv` is the Kaggle financial-distress dataset: 86 columns,
+  no real date and no money columns. It is a robustness fixture, not analysis data. The
+  detector flags `weak_headers` and `needs_user_confirmation` on it, and picking its integer
+  `Time` column as a date correctly yields no dates rather than a chart stretching to 1970.
 
-Do not assume these files always exist. Check before using them.
+`sample_data/` is git-ignored, so neither file is in the repository.
+
+Files referenced by earlier handoffs (`C:\Users\user\Desktop\transactions.csv` and similar)
+lived on a previous machine and are gone. Do not assume any local path exists; check first.
+
+### PDF Tables Wrapped Headers Mid-Word
+
+Problem:
+
+- The six-column anomaly table gave its first column double width, on the assumption that it
+  held a category name. It holds a date. The five remaining columns were squeezed until
+  `Показатель` broke into `Показател` / `ь`.
+
+Fix:
+
+- `_column_widths()` in `pdf_writer.py` shares width equally once a table reaches five
+  columns, and cells drop to 8pt at six.
+
+### Report CSV Is Not A Rectangle
+
+Problem:
+
+- A test read the exported CSV with `pandas.read_csv` and failed with a tokenizing error.
+
+Fix:
+
+- The report CSV is a stacked document whose blocks have different widths, which is correct
+  for something opened in Excel. The test now reads it with the `csv` module.
 
 ## Current State
 
@@ -358,7 +417,26 @@ The current app supports:
 - column detection and manual mapping;
 - basic financial metrics;
 - category summary;
-- interactive charts with resizing, fullscreen, grouping, readable axis labels, dynamic legend, and snap hover labels.
-- simple IQR/Z-score anomaly detection with compact and detailed UI output.
+- interactive charts with resizing, fullscreen, grouping, readable axis labels, dynamic legend, and snap hover labels;
+- simple IQR/Z-score anomaly detection with compact and detailed UI output, and markers on the chart;
+- report export to PDF, XLSX, HTML, PNG, and CSV, at brief or detailed depth, in Russian or English;
+- rule-based insights including burn rate and a cash gap warning.
 
-The next meaningful MVP feature is anomaly markers on charts or PDF export.
+All seven MVP success criteria from `PROJECT_CONTEXT.md` are met.
+
+The next meaningful feature is forecasting.
+
+## Verification Status
+
+Verified on 2026-08-15 with Python 3.12.10 in `.venv`:
+
+- `python -m pytest tests -q` - 86 passed.
+- `python -m compileall app -q` - no errors.
+- All five formats exported from `transactions_sample.csv` at both depths in both languages,
+  20 files, all non-empty.
+- PDF text extracted and checked: Cyrillic renders correctly, series names are translated,
+  no mid-word wrapping.
+- `Financial Distress.csv` loads, flags uncertainty, and exports without crashing.
+
+Not yet done by hand: clicking through the running application. The window builds under the
+offscreen Qt platform in `tests/test_export_ui.py`, but a human has not driven the real UI.
