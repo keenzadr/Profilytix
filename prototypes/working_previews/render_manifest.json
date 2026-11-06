@@ -1,0 +1,126 @@
+{
+  "synthetic_data": true,
+  "real_application": true,
+  "captures": [
+    {
+      "screenshot": "01_overview_light.png",
+      "theme": "light",
+      "page": 0,
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.0,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 42
+    },
+    {
+      "screenshot": "02_data_light.png",
+      "theme": "light",
+      "page": 1,
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.0,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 96
+    },
+    {
+      "screenshot": "03_categories_light.png",
+      "theme": "light",
+      "page": 2,
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.0,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0
+    },
+    {
+      "screenshot": "04_anomalies_forecast_light.png",
+      "theme": "light",
+      "page": 3,
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.0,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0
+    },
+    {
+      "screenshot": "05_reports_help_light.png",
+      "theme": "light",
+      "page": 4,
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.0,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 29
+    },
+    {
+      "screenshot": "01_overview_dark.png",
+      "theme": "dark",
+      "page": 0,
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.0,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 42
+    },
+    {
+      "screenshot": "02_data_dark.png",
+      "theme": "dark",
+      "page": 1,
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.0,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 96
+    },
+    {
+      "screenshot": "03_categories_dark.png",
+      "theme": "dark",
+      "page": 2,
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.0,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0
+    },
+    {
+      "screenshot": "04_anomalies_forecast_dark.png",
+      "theme": "dark",
+      "page": 3,
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.0,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0
+    },
+    {
+      "screenshot": "05_reports_help_dark.png",
+      "theme": "dark",
+      "page": 4,
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.0,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 29
+    }
+  ]
+}

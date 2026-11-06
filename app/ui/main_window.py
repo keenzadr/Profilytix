@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -85,6 +85,7 @@ from app.ui.export_dialog import ExportDialog, ExportOptions
 from app.ui.analysis_options import AnalysisOptionsWidget
 from app.ui.table_browser import TableBrowserDialog
 from app.ui.strings import normalize_language, tr
+from app.ui.shell import Sidebar, PAGES, stylesheet, style_chart
 from app.services.analysis_loader import AnalysisCancelled, load_selected_columns
 from app.services.mapping_profiles import MappingProfiles, MissingProfileColumns
 from app.reports.strings import label as report_label, series_label
@@ -100,6 +101,7 @@ from app.services.file_loader import (
 # detailed exported report wants the full list.
 ANALYSIS_CATEGORY_LIMIT = None
 UI_CATEGORY_LIMIT = 5
+UI_CATEGORY_TABLE_LIMIT = 100
 SELECTION_ROLES = (*COLUMN_ROLES, 'description')
 SELECTION_LABELS = {**ROLE_LABELS, 'description': 'Description (categorisation)'}
 
@@ -656,6 +658,9 @@ class ChartDialog(QDialog):
             lambda event: _update_chart_hover(event, self.hover_state),
         )
         layout.addWidget(self.canvas, stretch=1)
+        theme = getattr(self.parentWidget(), 'theme', 'light')
+        self.setStyleSheet(stylesheet(theme))
+        style_chart(self.figure, self.axes, theme)
 
 
 class ColumnSelectionDialog(QDialog):
@@ -692,7 +697,7 @@ class ColumnSelectionDialog(QDialog):
 
         warning_label = QLabel("")
         warning_label.setWordWrap(True)
-        warning_label.setStyleSheet("color: #8a5a00;")
+        warning_label.setProperty('tone', 'warning')
         if self.detection_result.needs_user_confirmation:
             warning_label.setText(_detection_warning_text(self.detection_result, self.language))
         else:
@@ -700,7 +705,7 @@ class ColumnSelectionDialog(QDialog):
 
         detected_label = QLabel(_format_detection_summary(self.detection_result, self.language))
         detected_label.setWordWrap(True)
-        detected_label.setStyleSheet("color: #444444;")
+        detected_label.setProperty('tone', 'muted')
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -749,7 +754,7 @@ class ColumnSelectionDialog(QDialog):
         candidates_text = _format_detection_candidates(self.detection_result, self.language)
         candidates_label = QLabel(candidates_text)
         candidates_label.setWordWrap(True)
-        candidates_label.setStyleSheet("color: #666666;")
+        candidates_label.setProperty('tone', 'muted')
         if not candidates_text:
             candidates_label.hide()
 
@@ -855,6 +860,7 @@ class MainWindow(QMainWindow):
     def __init__(self, language: str | None = None) -> None:
         super().__init__()
         self.settings = QSettings("Profilytix", "Profilytix")
+        self.theme = 'dark' if self.settings.value('ui_theme', 'light', str) == 'dark' else 'light'
         self.mapping_profiles = MappingProfiles(self.settings)
         self._close_pending = False
         self.language = normalize_language(language or self.settings.value("ui_language", "ru", str))
@@ -881,7 +887,8 @@ class MainWindow(QMainWindow):
         self.current_anomalies: AnomalyDetectionResult | None = None
         self.current_forecast: ForecastResult | None = None
         self.setWindowTitle("Profilytix")
-        self.resize(1000, 700)
+        self.resize(1280, 850)
+        self.setMinimumSize(960, 640)
 
         self._setup_ui()
 
@@ -916,6 +923,8 @@ class MainWindow(QMainWindow):
             self._update_chart(result.time_series)
             self._update_forecast_summary(result)
         self.analysis_options.set_language(self.language)
+        self.sidebar.set_language(self.language)
+        self._update_dashboard(self.current_metrics)
         for worker in (self.preview_worker, self.analysis_worker, self.export_worker):
             if worker is not None:
                 worker.language = self.language
@@ -927,22 +936,27 @@ class MainWindow(QMainWindow):
             _set_ui_text(self.status_label, "Loading preview for {name}...", self.language, name=Path(self.preview_worker.file_path).name)
 
     def _setup_ui(self) -> None:
-        """Build the initial application layout."""
+        """Build five persistent pages around the existing analysis controls."""
         central_widget = QWidget(self)
-        root_layout = QVBoxLayout(central_widget)
-        root_layout.setContentsMargins(20, 20, 20, 20)
-        root_layout.setSpacing(16)
-
+        root_layout = QHBoxLayout(central_widget)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        self.sidebar = Sidebar(self.language, self.settings.value('sidebar_collapsed', False, bool), self.theme)
+        self.sidebar.collapsed_changed.connect(lambda value: self.settings.setValue('sidebar_collapsed', value))
+        self.sidebar.theme_requested.connect(self._toggle_theme)
+        root_layout.addWidget(self.sidebar)
+        workspace = QWidget()
+        workspace.setObjectName('workspace')
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(24, 20, 24, 12)
+        workspace_layout.setSpacing(14)
         header_layout = QHBoxLayout()
-        title_label = QLabel("Profilytix")
-        title_label.setObjectName("titleLabel")
-        title_label.setStyleSheet("font-size: 24px; font-weight: 600;")
-
+        self.workspace_label = _ui_widget(QLabel(), 'Financial workspace', self.language)
+        self.workspace_label.setProperty('tone', 'muted')
         self.load_button = _ui_widget(QPushButton(), "Load Excel/CSV", self.language)
         self.load_button.setMinimumHeight(36)
         self.load_button.clicked.connect(self._choose_file)
-
-        header_layout.addWidget(title_label)
+        header_layout.addWidget(self.workspace_label)
         header_layout.addStretch()
         self.language_combo = QComboBox()
         self.language_combo.addItem("Русский", "ru")
@@ -951,34 +965,141 @@ class MainWindow(QMainWindow):
         self.language_combo.currentIndexChanged.connect(lambda: self.set_language(self.language_combo.currentData()))
         header_layout.addWidget(self.language_combo)
         header_layout.addWidget(self.load_button)
-
         table_preview_area = self._create_table_preview_area()
-        metrics_area = QScrollArea()
-        metrics_area.setWidgetResizable(True)
-        metrics_area.setMinimumWidth(340)
-        metrics_area.setWidget(self._create_analysis_area())
+        metrics_area = self._create_analysis_area()
+        header_layout.addWidget(self.analyze_button)
         chart_area = self._create_chart_area()
-
-        self.content_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.content_splitter.setChildrenCollapsible(False)
-        self.content_splitter.addWidget(table_preview_area)
-        self.content_splitter.addWidget(metrics_area)
-        self.content_splitter.setStretchFactor(0, 4)
-        self.content_splitter.setStretchFactor(1, 1)
-        self.content_splitter.setSizes([760, 300])
-
-        self.main_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.main_splitter.setChildrenCollapsible(False)
-        self.main_splitter.addWidget(self.content_splitter)
-        self.main_splitter.addWidget(chart_area)
-        self.main_splitter.setStretchFactor(0, 3)
-        self.main_splitter.setStretchFactor(1, 2)
-        self.main_splitter.setSizes([480, 280])
-
-        root_layout.addLayout(header_layout)
-        root_layout.addWidget(self.main_splitter, stretch=1)
-
+        self.page_stack = QStackedWidget()
+        self.sidebar.page_requested.connect(self.page_stack.setCurrentIndex)
+        self.page_layouts = []
+        for title in PAGES:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            page = QWidget()
+            page.setObjectName('page')
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(0, 6, 0, 6)
+            layout.setSpacing(16)
+            heading = _ui_widget(QLabel(), title, self.language)
+            heading.setProperty('role', 'heading')
+            layout.addWidget(heading)
+            scroll.setWidget(page)
+            self.page_stack.addWidget(scroll)
+            self.page_layouts.append(layout)
+        overview, data, categories, analysis, reports = self.page_layouts
+        overview.addWidget(metrics_area)
+        chart_area.setMinimumHeight(350)
+        overview.addWidget(chart_area, 1)
+        data.addWidget(self.mapping_area)
+        profile_card, profile_layout = self._card('Saved column mappings')
+        profile_layout.addWidget(self.analysis_options.profile_widget)
+        data.addWidget(profile_card)
+        data.addWidget(table_preview_area, 1)
+        self.category_table, self.category_summary = self._category_view(categories, 'Source categories')
+        self.derived_category_table, self.derived_category_summary = self._category_view(categories, 'Categories from descriptions')
+        analysis.addWidget(self.anomalies_area)
+        analysis.addStretch()
+        reports.addWidget(self.reports_area)
+        help_card, help_layout = self._card('Mode help')
+        for title, text in self._help_sections():
+            label = _ui_widget(QLabel(), title, self.language)
+            label.setProperty('role', 'card_title')
+            help_layout.addWidget(label)
+            label = _ui_widget(QLabel(), text, self.language)
+            label.setWordWrap(True)
+            label.setProperty('tone', 'muted')
+            help_layout.addWidget(label)
+        reports.addWidget(help_card)
+        reports.addStretch()
+        workspace_layout.addLayout(header_layout)
+        workspace_layout.addWidget(self.page_stack, 1)
+        # Global job status/cancellation must stay visible while browsing any page.
+        self.status_label.setWordWrap(True)
+        self.status_label.setTextFormat(Qt.TextFormat.PlainText)
+        footer = QHBoxLayout()
+        footer.addWidget(self.status_label, 1)
+        footer.addWidget(self.cancel_button)
+        workspace_layout.addLayout(footer)
+        workspace_layout.addWidget(self.progress_bar)
+        root_layout.addWidget(workspace, 1)
         self.setCentralWidget(central_widget)
+        self._update_dashboard(None)
+        self._apply_theme()
+
+    def _toggle_theme(self) -> None:
+        self.theme = 'light' if self.theme == 'dark' else 'dark'
+        self.settings.setValue('ui_theme', self.theme)
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        self.setStyleSheet(stylesheet(self.theme))
+        self.sidebar.set_theme(self.theme)
+        if self.chart_axes is not None:
+            style_chart(self.chart_figure, self.chart_axes, self.theme)
+            self.chart_canvas.draw_idle()
+
+    def _card(self, title: str) -> tuple[QFrame, QVBoxLayout]:
+        frame = QFrame()
+        frame.setProperty('role', 'card')
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+        label = _ui_widget(QLabel(), title, self.language)
+        label.setProperty('role', 'card_title')
+        layout.addWidget(label)
+        return frame, layout
+
+    def _category_view(self, page_layout, title):
+        frame, layout = self._card(title)
+        table = QTableWidget(0, 5)
+        table.setMinimumHeight(180)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.verticalHeader().hide()
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(table)
+        summary = QLabel()
+        summary.setWordWrap(True)
+        summary.setProperty('tone', 'muted')
+        layout.addWidget(summary)
+        page_layout.addWidget(frame)
+        return table, summary
+
+    def _update_dashboard(self, metrics: BasicMetrics | None) -> None:
+        _set_ui_text(self.report_hint, 'Report export is ready.' if metrics else 'Analyze a file to enable report export.', self.language)
+        for key, field in [('revenue', 'total_revenue'), ('expenses', 'total_expenses'), ('profit', 'total_profit')]:
+            value = getattr(metrics, field, None)
+            self.metric_values[key].setText('—' if value is None else format_money(value))
+        for table, summary, rows, derived in [
+            (self.category_table, self.category_summary, metrics.top_categories if metrics else (), False),
+            (self.derived_category_table, self.derived_category_summary, metrics.derived_categories if metrics else (), True),
+        ]:
+            table.setHorizontalHeaderLabels([self.tr(title) for title in ('Category', 'Transactions', 'Revenue', 'Expenses', 'Profit')])
+            _set_ui_text(summary, 'Showing {shown} of {total} categories. Full results are available in a detailed report.', self.language,
+                         shown=min(UI_CATEGORY_TABLE_LIMIT, len(rows)), total=len(rows))
+            rows = rows[:UI_CATEGORY_TABLE_LIMIT]
+            table.setRowCount(len(rows))
+            for i, item in enumerate(rows):
+                name = report_label(self.language, 'category_' + item.name) if derived else item.name
+                values = (name, format_number(item.transaction_count), format_money(item.revenue),
+                          format_money(item.expenses), format_money(item.profit))
+                for j, text in enumerate(values):
+                    cell = QTableWidgetItem(text)
+                    if j:
+                        cell.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    table.setItem(i, j, cell)
+
+    @staticmethod
+    def _help_sections():
+        return (
+            ('Getting started', 'Load a CSV or Excel file, review columns on Data, then click Analyze File. Navigation keeps your file and results.'),
+            ('Anomaly methods', 'IQR / Z-score rules need at least 4 periods; Isolation Forest needs 8. Each financial series is checked separately. Revenue/expense spikes and profit drops are flagged; signed amounts are checked in both directions. A signal is a reason to inspect the data, not proof of an error.'),
+            ('Grouping and forecast', 'Grouping changes the periods used by charts and anomaly detection. Week starts applies to weekly grouping. Forecasts use a moving average or linear trend from past values and cannot account for future one-off payments.'),
+            ('Cash balance', 'Current cash is optional and separate from profit. Cash runway and 30-day estimates use historical daily profit. Missing dates on money rows prevent a cash estimate.'),
+            ('Columns and categories', 'Review automatic column choices on Data. Saved mappings reuse column names. Description-based categories use local RU/EN rules and are separate from source categories; they are not a trained classifier.'),
+            ('Reports', 'Export PDF, XLSX, HTML, PNG or CSV after analysis. PNG requires a date-based chart. Choose report language and detail level in the export dialog; these are independent of the interface language.'),
+        )
 
     def _choose_file(self) -> None:
         """Open a file picker and load the selected spreadsheet."""
@@ -1026,6 +1147,9 @@ class MainWindow(QMainWindow):
         _set_ui_text(self.load_button, "Loading...", self.language)
         self.configure_columns_button.setEnabled(False)
         self.analyze_button.setEnabled(False)
+        self.analysis_options.setEnabled(False)
+        self.analysis_options.profile_widget.setEnabled(False)
+        self.export_button.setEnabled(False)
         _set_ui_text(self.status_label, "Loading preview for {name}{size}...", self.language, name=path.name, size=size_text)
         self.progress_bar.setRange(0, 0)
         self.progress_bar.show()
@@ -1041,6 +1165,9 @@ class MainWindow(QMainWindow):
         has_loaded_file = self.current_loaded_file is not None
         self.configure_columns_button.setEnabled(has_loaded_file)
         self.analyze_button.setEnabled(has_loaded_file)
+        self.analysis_options.setEnabled(True)
+        self.analysis_options.profile_widget.setEnabled(True)
+        self.export_button.setEnabled(True)
         self.progress_bar.hide()
         self.preview_thread = None
         self.preview_worker = None
@@ -1050,6 +1177,7 @@ class MainWindow(QMainWindow):
         """Display the loaded preview returned by the worker."""
         self._remember_file_directory(loaded_file.path)
         self._show_loaded_file(loaded_file)
+        self.sidebar.nav_buttons[1].click()
         _set_ui_text(self.status_label, "Preview loaded: {name}", self.language, name=loaded_file.file_name)
 
     def _handle_preview_failed(self, message: str) -> None:
@@ -1074,9 +1202,10 @@ class MainWindow(QMainWindow):
     def _create_table_preview_area(self) -> QFrame:
         """Create the file information and table preview area."""
         frame = QFrame(self)
-        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setProperty('role', 'card')
         frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         frame.setMinimumWidth(360)
+        frame.setMinimumHeight(330)
 
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -1087,10 +1216,20 @@ class MainWindow(QMainWindow):
 
         self.file_info_label = _ui_widget(QLabel(), "No file loaded.", self.language)
         self.file_info_label.setWordWrap(True)
-        self.file_info_label.setStyleSheet("color: #444444;")
+        self.file_info_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.file_info_label.setProperty('tone', 'muted')
+        self.file_info_label.hide()
+        self.file_summary_label = _ui_widget(QLabel(), 'No file loaded.', self.language)
+        self.file_summary_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.file_summary_label.setWordWrap(True)
+        self.file_summary_label.setProperty('tone', 'muted')
+        self.file_details_button = _ui_widget(QPushButton(), 'File details', self.language)
+        self.file_details_button.setCheckable(True)
+        self.file_details_button.setEnabled(False)
+        self.file_details_button.toggled.connect(self.file_info_label.setVisible)
 
         self.status_label = _ui_widget(QLabel(), "Ready.", self.language)
-        self.status_label.setStyleSheet("color: #666666;")
+        self.status_label.setProperty('tone', 'muted')
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(False)
@@ -1111,10 +1250,9 @@ class MainWindow(QMainWindow):
         self.table_widget.verticalHeader().setVisible(False)
 
         layout.addWidget(title_label)
+        layout.addWidget(self.file_summary_label)
+        layout.addWidget(self.file_details_button)
         layout.addWidget(self.file_info_label)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(self.cancel_button)
         layout.addWidget(self.browse_table_button)
         layout.addWidget(self.table_widget, stretch=1)
 
@@ -1136,7 +1274,7 @@ class MainWindow(QMainWindow):
 
         message_label = QLabel(message)
         message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        message_label.setStyleSheet("color: #666666;")
+        message_label.setProperty('tone', 'muted')
 
         layout.addWidget(title_label)
         layout.addStretch()
@@ -1148,6 +1286,7 @@ class MainWindow(QMainWindow):
     def _show_loaded_file(self, loaded_file: LoadedFile) -> None:
         """Display loaded file metadata and the first 100 rows."""
         self.current_loaded_file = loaded_file
+        self.file_details_button.setEnabled(True)
         self.browse_table_button.setEnabled(bool(loaded_file.column_names))
         self.analysis_options.save_button.setEnabled(bool(loaded_file.column_names))
         self.forecast_label.clear()
@@ -1157,6 +1296,7 @@ class MainWindow(QMainWindow):
         self.current_anomalies = None
         self.current_forecast = None
         self.current_analysis_result = None
+        self._update_dashboard(None)
         self.export_button.hide()
         self.open_report_folder_button.hide()
         self.current_anomalies = None
@@ -1179,6 +1319,8 @@ class MainWindow(QMainWindow):
         rows = loaded_file.row_count_text
         if loaded_file.total_rows is None and loaded_file.preview_row_count >= 100:
             rows = self.tr("{count}+ (fast preview)", count=loaded_file.preview_row_count)
+        _set_ui_text(self.file_summary_label, '{name} · {rows} rows · {count} columns', self.language,
+                     name=loaded_file.file_name, rows=rows, count=loaded_file.column_count)
         self.file_info_label.setText(self.tr(
             "File: {name}\nSize: {size}\nRows: {rows}\nColumns: {count}\nPreview rows: {preview}\nColumn names: {columns}{encoding}{delimiter}{reader}",
             name=loaded_file.file_name, size=loaded_file.file_size_text,
@@ -1208,53 +1350,53 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, tr("Could not load file", self.language), message)
 
     def _create_analysis_area(self) -> QFrame:
-        """Create the detected columns and metrics area."""
-        frame = QFrame(self)
-        frame.setFrameShape(QFrame.Shape.StyledPanel)
-        frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        frame.setMinimumHeight(240)
-
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
-
-        self.detected_columns_title_label = _ui_widget(QLabel(), "Detected columns", self.language)
-        self.detected_columns_title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
+        """Create working controls once, grouped for their persistent pages."""
+        self.mapping_area, mapping = self._card('Column selection')
+        self.detected_columns_title_label = mapping.itemAt(0).widget()
 
         self.detection_warning_label = QLabel("")
         self.detection_warning_label.setWordWrap(True)
-        self.detection_warning_label.setStyleSheet("color: #8a5a00;")
+        self.detection_warning_label.setProperty('tone', 'warning')
         self.detection_warning_label.hide()
 
         self.detected_columns_label = _ui_widget(QLabel(), "Load a file to detect columns.", self.language)
+        self.detected_columns_label.setTextFormat(Qt.TextFormat.PlainText)
         self.detected_columns_label.setWordWrap(True)
-        self.detected_columns_label.setStyleSheet("color: #444444;")
+        self.detected_columns_label.setProperty('tone', 'muted')
 
         self.configure_columns_button = _ui_widget(QPushButton(), "Configure Columns...", self.language)
         self.configure_columns_button.setEnabled(False)
         self.configure_columns_button.clicked.connect(self._open_column_selection_dialog)
 
-        metrics_title_label = _ui_widget(QLabel(), "Metrics", self.language)
-        metrics_title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
-
+        frame, layout = self._card('Financial summary')
+        self.metric_values = {}
+        cards = QHBoxLayout()
+        for key, title in [('revenue', 'Revenue'), ('expenses', 'Expenses'), ('profit', 'Profit')]:
+            card, card_layout = self._card(title)
+            value = QLabel('—')
+            value.setProperty('role', 'metric')
+            value.setTextFormat(Qt.TextFormat.PlainText)
+            card_layout.addWidget(value)
+            self.metric_values[key] = value
+            cards.addWidget(card, 1)
+        layout.addLayout(cards)
         self.metrics_label = _ui_widget(QLabel(), "Metrics will be calculated in the next step.", self.language)
         self.metrics_label.setWordWrap(True)
-        self.metrics_label.setStyleSheet("color: #666666;")
+        self.metrics_label.setProperty('tone', 'muted')
 
         self.metrics_details_button = _ui_widget(QPushButton(), "Show Details...", self.language)
         self.metrics_details_button.clicked.connect(self._show_metrics_details)
         self.metrics_details_button.hide()
 
-        anomalies_title_label = _ui_widget(QLabel(), "Anomalies", self.language)
-        anomalies_title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
-
+        self.anomalies_area, anomalies = self._card('Analysis settings and results')
         self.anomalies_label = _ui_widget(QLabel(), "Analyze a file to see anomalies.", self.language)
         self.anomalies_label.setWordWrap(True)
-        self.anomalies_label.setStyleSheet("color: #666666;")
+        self.anomalies_label.setProperty('tone', 'muted')
 
         self.analyze_button = _ui_widget(QPushButton(), "Analyze File", self.language)
         self.analyze_button.setEnabled(False)
         self.analyze_button.clicked.connect(self._start_analysis)
+        self.analyze_button.setProperty('primary', True)
         self.analysis_options = AnalysisOptionsWidget(self, self.language)
         self.analysis_options.set_profiles(self.mapping_profiles.names())
         self.analysis_options.save_button.setEnabled(False)
@@ -1272,31 +1414,30 @@ class MainWindow(QMainWindow):
         self.open_report_folder_button = _ui_widget(QPushButton(), "Open Folder", self.language)
         self.open_report_folder_button.clicked.connect(self._open_report_folder)
         self.open_report_folder_button.hide()
-
-        layout.addWidget(self.detected_columns_title_label)
-        layout.addWidget(self.detection_warning_label)
-        layout.addWidget(self.detected_columns_label)
-        layout.addWidget(self.configure_columns_button)
-        layout.addSpacing(12)
-        layout.addWidget(metrics_title_label)
+        self.reports_area, reports = self._card('Export Report')
+        self.report_hint = _ui_widget(QLabel(), 'Analyze a file to enable report export.', self.language)
+        self.report_hint.setWordWrap(True)
+        self.report_hint.setProperty('tone', 'muted')
+        reports.addWidget(self.report_hint)
+        reports.addWidget(self.export_button)
+        reports.addWidget(self.open_report_folder_button)
+        for widget in (self.detection_warning_label,
+                       self.detected_columns_label, self.configure_columns_button):
+            mapping.addWidget(widget)
         layout.addWidget(self.metrics_label)
         layout.addWidget(self.metrics_details_button)
-        layout.addSpacing(8)
-        layout.addWidget(anomalies_title_label)
-        layout.addWidget(self.anomalies_label)
-        layout.addWidget(self.forecast_label)
-        layout.addWidget(self.analysis_options)
-        layout.addStretch()
-        layout.addWidget(self.export_button)
-        layout.addWidget(self.open_report_folder_button)
-        layout.addWidget(self.analyze_button)
-
+        anomalies.addWidget(self.analysis_options)
+        anomalies.addWidget(self.anomalies_label)
+        anomalies.addWidget(self.forecast_label)
+        mode_help = _ui_widget(QPushButton(), 'Mode help', self.language)
+        mode_help.clicked.connect(lambda: self.sidebar.nav_buttons[4].click())
+        anomalies.addWidget(mode_help)
         return frame
 
     def _create_chart_area(self) -> QFrame:
         """Create the time-series chart area."""
         frame = QFrame(self)
-        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setProperty('role', 'card')
         frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         frame.setMinimumHeight(240)
 
@@ -1323,10 +1464,12 @@ class MainWindow(QMainWindow):
 
         header_layout.addWidget(title_label)
         header_layout.addStretch()
-        header_layout.addWidget(grouping_label)
-        header_layout.addWidget(self.grouping_combo)
-        header_layout.addWidget(self.week_start_label)
-        header_layout.addWidget(self.week_start_combo)
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(grouping_label)
+        filter_layout.addWidget(self.grouping_combo)
+        filter_layout.addWidget(self.week_start_label)
+        filter_layout.addWidget(self.week_start_combo)
+        filter_layout.addStretch()
 
         self.open_chart_button = _ui_widget(QPushButton(), "Open Fullscreen", self.language)
         self.open_chart_button.setEnabled(False)
@@ -1335,9 +1478,10 @@ class MainWindow(QMainWindow):
 
         self.chart_message_label = _ui_widget(QLabel(), "Analyze a file to see charts.", self.language)
         self.chart_message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.chart_message_label.setStyleSheet("color: #666666;")
+        self.chart_message_label.setProperty('tone', 'muted')
 
         layout.addLayout(header_layout)
+        layout.addLayout(filter_layout)
 
         if Figure is None or FigureCanvas is None:
             _set_ui_text(self.chart_message_label, "Install matplotlib to show charts.", self.language)
@@ -1375,6 +1519,7 @@ class MainWindow(QMainWindow):
         if self.chart_axes is not None:
             self.chart_axes.clear()
             self.chart_axes.set_axis_off()
+            style_chart(self.chart_figure, self.chart_axes, self.theme)
         if self.chart_canvas is not None:
             self.chart_canvas.draw_idle()
         self.open_chart_button.setEnabled(False)
@@ -1406,6 +1551,7 @@ class MainWindow(QMainWindow):
         draw_forecast(self.chart_axes, time_series, self.current_forecast, chart_lines)
         draw_anomaly_markers(self.chart_axes, time_series, self.current_anomalies)
         _localize_chart(self.chart_axes, time_series, self.language)
+        style_chart(self.chart_figure, self.chart_axes, self.theme)
         self.current_time_series = time_series
         self._connect_chart_tooltip(chart_lines, time_series.grouping)
         self.open_chart_button.setEnabled(True)
@@ -1633,6 +1779,7 @@ class MainWindow(QMainWindow):
         self.analyze_button.setEnabled(not is_running and self.current_loaded_file is not None)
         self.configure_columns_button.setEnabled(not is_running and self.current_loaded_file is not None)
         self.analysis_options.setEnabled(not is_running)
+        self.analysis_options.profile_widget.setEnabled(not is_running)
         _set_ui_text(self.export_button, "Exporting..." if is_running else "Export Report...", self.language)
         if is_running:
             self.open_report_folder_button.hide()
@@ -1711,6 +1858,7 @@ class MainWindow(QMainWindow):
     def _invalidate_analysis(self) -> None:
         """A new mapping cannot leave an export button for old results behind."""
         self.current_analysis_result = None
+        self._update_dashboard(None)
         self.current_metrics = None
         self.current_metrics_text = ''
         self.current_anomalies = None
@@ -1794,6 +1942,8 @@ class MainWindow(QMainWindow):
         """Update controls while analysis is running."""
         self.analyze_button.setEnabled(not is_running)
         self.analysis_options.setEnabled(not is_running)
+        self.analysis_options.profile_widget.setEnabled(not is_running)
+        self.analysis_options.profile_widget.setEnabled(not is_running)
         self.browse_table_button.setEnabled(not is_running and self.current_loaded_file is not None)
         self.cancel_button.setVisible(is_running)
         self.cancel_button.setEnabled(is_running)
@@ -1833,6 +1983,7 @@ class MainWindow(QMainWindow):
         self.current_anomalies = result.anomalies
         self.current_forecast = result.forecast
         self.current_analysis_result = result
+        self._update_dashboard(result.metrics)
         self._update_forecast_summary(result)
         self.current_metrics_text = self._format_analysis_details(
             result.metrics,
@@ -1845,7 +1996,7 @@ class MainWindow(QMainWindow):
         )
         self.metrics_details_button.show()
         self.export_button.show()
-        self._set_detected_columns_visible(False)
+        self._set_detected_columns_visible(True)
         self._update_chart(result.time_series)
         _set_ui_text(self.status_label, "Analysis complete.", self.language)
 
@@ -1862,7 +2013,7 @@ class MainWindow(QMainWindow):
         self._show_load_error(message)
 
     def _set_detected_columns_visible(self, is_visible: bool) -> None:
-        """Show column selection controls before analysis and hide them after analysis."""
+        """Keep the selected mapping reviewable on the Data page after analysis."""
         self.detected_columns_title_label.setVisible(is_visible)
         self.detection_warning_label.setVisible(
             is_visible

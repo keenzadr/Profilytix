@@ -10,6 +10,7 @@ if not generated.is_file():
     raise RuntimeError("Generate the offline demo first: use scripts/build_windows.ps1")
 
 datas = [(str(generated), "demo")]
+datas.append((str(root / "app" / "ui" / "assets"), "app/ui/assets"))
 datas += collect_data_files("matplotlib", excludes=["mpl-data/sample_data/**", "**/tests/**"])
 datas += collect_data_files("reportlab")
 datas += collect_data_files("openpyxl")

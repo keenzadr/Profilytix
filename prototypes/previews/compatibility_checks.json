@@ -1,0 +1,61 @@
+{
+  "python": "3.12.7",
+  "pyside6": "6.11.1",
+  "matplotlib": "3.11.1",
+  "offscreen_smoke": "passed",
+  "checks": [
+    "five navigation buttons",
+    "keyboard tab and space on navigation",
+    "three method explanations",
+    "theme roundtrip preserves page",
+    "native frame flag",
+    "embedded Matplotlib",
+    "100-row Qt table",
+    "mock actions disabled",
+    "consistent synthetic totals"
+  ],
+  "scale_checks": [
+    {
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.0,
+      "captures": 6,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0
+    },
+    {
+      "size": [
+        1000,
+        700
+      ],
+      "dpr": 1.0,
+      "captures": 6,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 145
+    },
+    {
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.25,
+      "captures": 6,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0
+    },
+    {
+      "size": [
+        1280,
+        850
+      ],
+      "dpr": 1.5,
+      "captures": 6,
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0
+    }
+  ],
+  "original_pyonedark_runtime": "blocked: upstream archive unavailable",
+  "real_windows_dpi_and_frame_controls": "not tested"
+}

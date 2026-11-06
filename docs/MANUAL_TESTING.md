@@ -81,7 +81,7 @@ below 6 periods by design.
 - [ ] Hovering shows a vertical guide, the date, and exact values.
 - [ ] The x-axis stays within 2026. Any sign of 1970 is a regression.
 - [ ] `Open Fullscreen` shows the same markers and forecast.
-- [ ] Splitters resize the table, metrics, and chart areas.
+- [ ] Navigation switches between Overview, Data, Categories, Anomalies/forecast and Reports/help without resetting results.
 
 ## 2. English Excel, the case that used to be wrong
 
@@ -140,6 +140,22 @@ Then open each file:
 - [ ] Loading a second file clears the previous metrics, chart, and export button.
 
 ## Reporting a failure
+
+### New desktop shell checks (2026-11-06)
+
+Native launch, sidebar collapse and theme switching have been inspected. The scenarios
+below still need complete interactive acceptance; offscreen tests do not check Windows DPI.
+
+- [ ] After loading a file, Data opens for mapping review; analyse, then inspect Overview and Categories.
+- [ ] Collapse/expand the sidebar. Icons retain tooltips and keyboard names; the current page and selected table row remain.
+- [ ] Switch the bottom-left theme control, restart, and confirm theme/sidebar preferences persist.
+- [ ] In dark mode inspect column selection, export, all-row table and fullscreen chart dialogs.
+- [ ] While analysis runs, navigate to another page and cancel from the global footer.
+- [ ] While export runs, saved column mappings cannot be changed; they become available after completion.
+- [ ] Open File details, then load a new file; metadata, categories, KPIs and export state must correspond to the new file.
+- [ ] Review mode help in RU/EN. Changing language keeps the chosen method, balance and mapping.
+- [ ] Inspect both themes at Windows 100/125/150%, maximise/restore and move between monitors.
+- [ ] For more than 100 categories, the UI shows the display limit and full count; the detailed report retains all categories.
 
 Note what was clicked, what appeared, and what was expected. The numbers above are known
 good, so any difference is a UI defect rather than an analysis one.

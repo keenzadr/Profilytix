@@ -1,0 +1,104 @@
+{
+  "synthetic_data": true,
+  "rows": 180,
+  "revenue": 1248000,
+  "expense": 864000,
+  "captures": [
+    {
+      "page": "overview",
+      "theme": "light",
+      "window_logical": [
+        1280,
+        850
+      ],
+      "device_pixel_ratio": 1.0,
+      "viewport_logical": [
+        1208,
+        793
+      ],
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0,
+      "screenshot": "01_overview_light.png"
+    },
+    {
+      "page": "data",
+      "theme": "light",
+      "window_logical": [
+        1280,
+        850
+      ],
+      "device_pixel_ratio": 1.0,
+      "viewport_logical": [
+        1208,
+        793
+      ],
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0,
+      "screenshot": "02_data_light.png"
+    },
+    {
+      "page": "categories",
+      "theme": "light",
+      "window_logical": [
+        1280,
+        850
+      ],
+      "device_pixel_ratio": 1.0,
+      "viewport_logical": [
+        1208,
+        793
+      ],
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0,
+      "screenshot": "03_categories_light.png"
+    },
+    {
+      "page": "anomalies_forecast",
+      "theme": "light",
+      "window_logical": [
+        1280,
+        850
+      ],
+      "device_pixel_ratio": 1.0,
+      "viewport_logical": [
+        1208,
+        793
+      ],
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0,
+      "screenshot": "04_anomalies_forecast_light.png"
+    },
+    {
+      "page": "reports_help",
+      "theme": "light",
+      "window_logical": [
+        1280,
+        850
+      ],
+      "device_pixel_ratio": 1.0,
+      "viewport_logical": [
+        1208,
+        793
+      ],
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0,
+      "screenshot": "05_reports_help_light.png"
+    },
+    {
+      "page": "overview",
+      "theme": "dark",
+      "window_logical": [
+        1280,
+        850
+      ],
+      "device_pixel_ratio": 1.0,
+      "viewport_logical": [
+        1208,
+        793
+      ],
+      "horizontal_scroll_max": 0,
+      "vertical_scroll_max": 0,
+      "screenshot": "06_overview_dark.png"
+    }
+  ]
+}

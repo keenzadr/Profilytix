@@ -1,10 +1,13 @@
 # Profilytix roadmap status — 2026-11-06
 
 The current forward plan and Russian feature summary are in `docs/NEXT_STEPS.md`.
-In-app mode help is the first planned task and is not implemented yet.
-Approved UI direction: evaluate PyOneDark on Python 3.12+/current PySide6, agree a mockup,
-then migrate the existing features into five sections using Actual Budget as a visual
-reference. Qt-Material is the fallback. This is planning only; no UI template was installed.
+The approved five-page design is implemented in the working application using existing
+Qt Widgets. Theme switching is bottom-left; the sidebar collapses to icons with tooltips
+and accessible names. Both preferences persist. Basic offline RU/EN mode help is available
+from analysis settings and the fifth page. No new dependency or template code was installed.
+Original PyOneDark runtime compatibility remains unverified; the current shell does not
+depend on it. Native launch/sidebar/theme were inspected; full manual acceptance and
+cross-monitor Windows DPI checks remain. See `prototypes/PYONEDARK_COMPATIBILITY.md`.
 
 ## Implemented
 
@@ -12,6 +15,8 @@ reference. Qt-Material is the fallback. This is planning only; no UI template wa
 |---|---|
 | Local Windows MVP | Excel/CSV, preview, mappings, metrics, charts, rules, five exports preserved |
 | Russian UI | RU default, EN switch, persistent choice, source data preserved |
+| Desktop shell | Five persistent pages, light/dark theme, collapsible sidebar, global status/progress/cancel, KPI cards and bounded category tables |
+| Mode help | Offline RU/EN guidance; further numeric examples and detailed report-format explanations remain planned |
 | Transaction categorisation | Explicit description selection, local RU/EN rules, six categories, separate from supplied dimensions |
 | Isolation Forest | Optional deterministic method, eight-period/constant/nonfinite guards |
 | Simple forecasting | Existing moving average/trend plus numeric next-period summary in the panel |
@@ -46,6 +51,15 @@ payments or LLM API was introduced.
 - A forecast/runway is an estimate from past data; the entered balance is not inferred from profit.
 
 ## Verification
+
+Latest UI migration verification: **230 tests and 25 subtests passed** (27.98s).
+Compileall and diff whitespace checks passed. Independent UI review found a dark QTableView
+contrast regression and reparented mapping controls remaining active during export; both
+were reproduced by failing tests and fixed. Real-app renders cover five pages in both
+themes at 1280×850 / DPR 1 and 1000×700 / DPR 1.5, with no horizontal page scrolling.
+`prototypes/working_previews/` contains synthetic-data captures through the real analyzer.
+
+Earlier feature-stage verification follows:
 
 Initial unchanged suite: 132 passed using a repository-local pytest temporary directory.
 New behavior has regression tests for RU/EN matching and UI persistence, profiles/schema

@@ -7,8 +7,21 @@ the approved UI direction (PyOneDark shell candidate, Actual Budget as a visual 
 compatibility prototype and agreed mockup before migration; Qt-Material fallback),
 verification limits and the next sequence: in-app help, ML candidate experiments/evaluation,
 manual acceptance/fixes, first-run guidance and a verified Windows release. The user removed
-the business-owner pilot from the plan and prioritised ML research. Current work remains
-documentation/research only; no new model/dependency has been installed or implemented.
+the business-owner pilot from the plan and prioritised ML research. A separate native Qt
+five-page preview exists in `prototypes/ui_preview.py`, and the approved layout has now
+been applied to production UI using existing Qt Widgets. Theme switching is bottom-left;
+the sidebar collapses to icons, with persisted preferences. File/analysis widgets remain
+the same instances across pages. Basic offline help, KPI cards and category tables (first
+100 rows, full results retained for reports) are connected to actual results. Global status,
+progress and analysis cancellation remain available across pages. See
+`prototypes/PYONEDARK_COMPATIBILITY.md` and `prototypes/working_previews/`.
+The original PyOneDark archive could not be retrieved (DNS failure/browser timeout), so
+its runtime compatibility remains unverified. The user approved the mockup with corrections
+and explicitly requested migration. Native launch/theme/sidebar were inspected; full manual
+acceptance and cross-monitor Windows DPI/frame checks remain. No new model/dependency was
+installed. Latest verification: 230 tests + 25 subtests, compileall and diff checks passed.
+Fresh review found dark all-row table contrast and unlocked mappings during export; both
+received failing regression tests and fixes. Prior feature-stage results below are historical.
 
 ## Current update (supersedes the older snapshot below)
 

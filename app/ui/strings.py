@@ -159,6 +159,33 @@ _RU = {
     "Unknown anomaly method. Use 'rules' or 'isolation_forest'.": "Неизвестный метод поиска аномалий. Используйте 'rules' или 'isolation_forest'.",
 }
 
+_RU.update({
+    'File details': 'Сведения о файле',
+    '{name} · {rows} rows · {count} columns': '{name} · строк: {rows} · столбцов: {count}',
+    'Showing {shown} of {total} categories. Full results are available in a detailed report.': 'Показано категорий: {shown} из {total}. Полные результаты доступны в подробном отчёте.',
+    'Overview': 'Обзор', 'Data': 'Данные', 'Categories': 'Категории',
+    'Anomalies and forecast': 'Аномалии и прогноз', 'Reports and help': 'Отчёты и справка',
+    'Collapse sidebar': 'Свернуть панель', 'Expand sidebar': 'Развернуть панель',
+    'Light theme': 'Светлая тема', 'Dark theme': 'Тёмная тема',
+    'Local app · data stays on this device': 'Локальное приложение · данные остаются на устройстве',
+    'Financial workspace': 'Финансовая аналитика', 'Financial summary': 'Финансовая сводка',
+    'Column selection': 'Выбор столбцов', 'Saved column mappings': 'Сохранённые схемы столбцов',
+    'Analysis settings and results': 'Настройки и результаты анализа',
+    'Source categories': 'Исходные категории', 'Categories from descriptions': 'Категории по описанию',
+    'Transactions': 'Операции', 'Mode help': 'Справка по режимам',
+    'Analyze a file to enable report export.': 'Выполните анализ файла для экспорта отчёта.',
+    'Report export is ready.': 'Отчёт готов к экспорту.',
+    'Getting started': 'Начало работы', 'Anomaly methods': 'Методы поиска аномалий',
+    'Grouping and forecast': 'Группировка и прогноз', 'Cash balance': 'Денежный остаток',
+    'Columns and categories': 'Столбцы и категории', 'Reports': 'Отчёты',
+    'Load a CSV or Excel file, review columns on Data, then click Analyze File. Navigation keeps your file and results.': 'Загрузите CSV или Excel, проверьте столбцы в разделе «Данные» и нажмите «Анализировать файл». При переходе между разделами файл и результаты сохраняются.',
+    'IQR / Z-score rules need at least 4 periods; Isolation Forest needs 8. Each financial series is checked separately. Revenue/expense spikes and profit drops are flagged; signed amounts are checked in both directions. A signal is a reason to inspect the data, not proof of an error.': 'Правила IQR / Z-score требуют минимум 4 периода, Isolation Forest — 8. IQR использует межквартильный размах, Z-score — отклонение от среднего в стандартных отклонениях; правила объединены в один режим. Isolation Forest изолирует редкие значения с помощью случайных разбиений. Каждый финансовый ряд проверяется отдельно: всплески выручки и расходов, падения прибыли; сумма — в обоих направлениях. Сигнал — повод проверить данные, а не доказательство ошибки.',
+    'Grouping changes the periods used by charts and anomaly detection. Week starts applies to weekly grouping. Forecasts use a moving average or linear trend from past values and cannot account for future one-off payments.': 'Группировка меняет периоды графика и поиска аномалий. Начало недели применяется при недельной группировке. Прогноз использует скользящее среднее или линейный тренд по прошлым значениям и не учитывает будущие разовые платежи.',
+    'Current cash is optional and separate from profit. Cash runway and 30-day estimates use historical daily profit. Missing dates on money rows prevent a cash estimate.': 'Текущий денежный остаток необязателен и учитывается отдельно от прибыли. Оценка срока до исчерпания средств и остатка через 30 дней основана на средней дневной прибыли. Операции с суммой без корректной даты не позволяют рассчитать запас денег.',
+    'Review automatic column choices on Data. Saved mappings reuse column names. Description-based categories use local RU/EN rules and are separate from source categories; they are not a trained classifier.': 'Проверьте автоматически выбранные столбцы в разделе «Данные». Сохранённые схемы используют названия столбцов. Категории по описанию определяются локальными правилами RU/EN и показываются отдельно от исходных категорий; это не обученный классификатор.',
+    'Export PDF, XLSX, HTML, PNG or CSV after analysis. PNG requires a date-based chart. Choose report language and detail level in the export dialog; these are independent of the interface language.': 'После анализа доступны PDF, XLSX, HTML, PNG и CSV. Для PNG нужен график по датам. Язык и подробность отчёта выбираются в диалоге экспорта независимо от языка интерфейса.',
+})
+
 STRINGS = {"en": {key: key for key in _RU}, "ru": _RU}
 
 
