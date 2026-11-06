@@ -58,6 +58,7 @@ class ReportModel:
     language: str
     depth: str
     forecast: ReportTable | None = None
+    derived_categories: ReportTable | None = None
 
     @property
     def has_chart(self) -> bool:
@@ -69,5 +70,5 @@ class ReportModel:
 
         Every writer walks this, so a table added here reaches all five formats.
         """
-        candidates = (self.forecast, self.categories, self.anomalies, self.periods)
+        candidates = (self.forecast, self.categories, self.derived_categories, self.anomalies, self.periods)
         return tuple(table for table in candidates if table is not None and not table.is_empty)

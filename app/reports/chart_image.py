@@ -224,6 +224,7 @@ def render_chart_png(
     width_in: float = EXPORT_WIDTH_INCHES,
     height_in: float = EXPORT_HEIGHT_INCHES,
     dpi: int = EXPORT_DPI,
+    language: str = 'en',
 ) -> bytes | None:
     """Render the chart to PNG bytes, or return None when there is nothing to draw."""
     if Figure is None or FigureCanvasAgg is None:
@@ -238,6 +239,17 @@ def render_chart_png(
     chart_lines = draw_time_series_chart(axes, figure, time_series)
     draw_forecast(axes, time_series, forecast, chart_lines)
     draw_anomaly_markers(axes, time_series, anomalies)
+    if language == 'ru':
+        from app.reports.strings import label, series_label
+
+        names = {value: series_label(language, key) for key, value in CHART_SERIES_LABELS.items()}
+        names.update({ANOMALY_LEGEND_LABEL: label(language, 'chart_anomaly'), FORECAST_LEGEND_LABEL: label(language, 'chart_forecast')})
+        for artist in axes.lines:
+            current = artist.get_label()
+            if current in names:
+                artist.set_label(names[current])
+        axes.set_title(', '.join(series_label(language, key) for key in time_series.visible_series) + ' — ' + label(language, 'grouping_' + time_series.grouping))
+        axes.legend(loc='best')
 
     buffer = BytesIO()
     figure.savefig(buffer, format="png", bbox_inches="tight")

@@ -1,10 +1,10 @@
 # Manual Testing Checklist
 
-Last updated: 2026-08-16
+Last updated: 2026-11-06
 
-Everything below is unverified by hand. The automated suite covers the report layer, the
-export dialog, and the export worker, and the main window builds under the offscreen Qt
-platform. Nobody has driven the real interface.
+Native Windows startup and the Russian controls were visually inspected on 2026-11-06.
+The remaining workflow checkboxes below are unverified interactively. Automated tests cover
+the new file loading, mapping, categorisation, cash estimates, workers and report features.
 
 Expected numbers were produced programmatically on the same code. A mismatch therefore points
 at the UI layer, which is exactly the part tests do not reach.
@@ -12,25 +12,50 @@ at the UI layer, which is exactly the part tests do not reach.
 ## Setup
 
 ```bash
-cd "C:/Users/bahil/Desktop/prof/Profilytix"; ./.venv/Scripts/python.exe -m app.main
+cd "C:/Users/user/Desktop/Profilytix"; ./.venv/Scripts/python.exe -m app.main
 ```
 
-The venv matters. The system Python is 3.11 with no dependencies installed and the
-application will not start on it.
+The venv matters, and so does calling it by path rather than relying on `python`. On the
+current machine the system Python is also 3.12 and carries most dependencies, which makes a
+wrong interpreter fail late instead of immediately: everything works until PDF export, where
+`reportlab` is missing. Use `./.venv/Scripts/python.exe` for every command below.
 
 If `sample_data/transactions_sample.csv` is missing, regenerate it:
 
 ```bash
-cd "C:/Users/bahil/Desktop/prof/Profilytix"; ./.venv/Scripts/python.exe scripts/make_sample_data.py
+cd "C:/Users/user/Desktop/Profilytix"; ./.venv/Scripts/python.exe scripts/make_sample_data.py
 ```
 
 ## 0. Launch
 
-- [ ] A window titled `Profilytix` appears and stays open.
+- [x] A window titled `Profilytix` appears and stays open (native Windows, 2026-11-06).
 
-This one is genuinely open. On 2026-08-15 the process was started in the background, ran, and
-exited with code 0 printing nothing at all. That is what closing a window looks like, but it
-is also what an immediate exit looks like. Confirm the window really appears.
+The 2026-08-15 startup uncertainty is resolved. The current window was raised and its Russian
+controls were inspected. The file workflow still needs the checks below.
+
+## New roadmap checks (2026-11-06)
+
+- [ ] Switch Russian/English before and after analysis: preserve selected columns, source
+      headers/cells and results. Restart and confirm language persistence.
+- [ ] Select Description in Configure Columns; include Rent, Salary, Ads, Kaspi QR and their
+      Russian equivalents. Confirm the derived breakdown appears separately from Region or
+      other explicit categories in Details and in PDF/XLSX/HTML/CSV reports.
+- [ ] Save a mapping, open a matching file and apply it. A file lacking a saved column must
+      show a readable error and preserve the previous selection.
+- [ ] Supply a known current balance on a losing dated file: balance 200 and net loss 10/day
+      should give 20 days. Empty balance must produce no invented runway; zero is valid.
+- [ ] Include an invalid-date nonzero operation: cash estimates must be withheld and the
+      report must explain the missing dates.
+- [ ] Compare IQR/Z-score with Isolation Forest (eight or more finite periods). Short and
+      constant inputs must not produce arbitrary ML anomalies.
+- [ ] Load a large CSV/XLSX: progress uses measured bytes/rows. Cancel during loading and
+      analysis; do not publish partial results, and keep the window usable.
+- [ ] Close while background work is active: finish safely without a QThread crash.
+- [ ] View all rows; Previous/Next reach rows beyond 100 and the final page disables Next.
+- [ ] Test blank/duplicate headers including a real `Column 1` header alongside a blank cell.
+      Analysis and pages must select the same physical values as preview.
+- [ ] Inspect a release bundle and installer when build tools become available. Follow
+      packaging/README.md and inspect the Cyrillic PDF emitted by the frozen smoke test.
 
 ## 1. Russian CSV, automatic detection
 

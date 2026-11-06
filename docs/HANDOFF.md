@@ -1,6 +1,44 @@
 # Profilytix Handoff
 
-Last updated: 2026-08-16
+Last updated: 2026-11-06
+
+Current forward plan: `docs/NEXT_STEPS.md` (Russian). It records implemented features,
+the approved UI direction (PyOneDark shell candidate, Actual Budget as a visual reference,
+compatibility prototype and agreed mockup before migration; Qt-Material fallback),
+verification limits and the next sequence: in-app help, ML candidate experiments/evaluation,
+manual acceptance/fixes, first-run guidance and a verified Windows release. The user removed
+the business-owner pilot from the plan and prioritised ML research. Current work remains
+documentation/research only; no new model/dependency has been installed or implemented.
+
+## Current update (supersedes the older snapshot below)
+
+The old roadmap has now been implemented through the desktop feature and packaging-source
+stages. See `docs/ROADMAP_STATUS.md` for the current status and remaining work.
+
+Added: Russian/English desktop switching; explicit description-based RU/EN categorisation
+alongside existing categories; reusable local mapping profiles; optional Isolation Forest;
+explicit-balance cash runway/30-day estimates; next-period forecast in the panel; sparse
+category context for anomalies; cancellable loading with measured bytes/rows; bounded
+background table pages; consistent unique physical-header mapping; safe deferred close;
+PyInstaller spec, Inno Setup script, dependency locks, logging and frozen smoke sources.
+
+Cash estimates are suppressed if any nonzero money transactions have invalid dates. All
+global totals remain intact. Forecasting is still a simple historical estimate. Category
+context is a largest directional contribution, not causal attribution.
+
+Native Windows launch and Russian controls were visually inspected. The complete manual
+file/import/export pass and customer interviews have not been completed. No frozen EXE or
+installer was built: PyInstaller is missing and PyPI DNS is unavailable; Inno Setup is absent.
+The source smoke exercises fonts, charts and all five exports. See packaging/BUILD_STATUS.md.
+
+No git commit or branch was created because this environment allows only reading `.git`.
+The pre-existing edits to MANUAL_TESTING.md were preserved.
+
+Final verification: 220 tests and 25 subtests passed (23.90s), compileall app/packaging and
+git diff --check passed. Thread cleanup regressions cover deferred closing and paged browsing.
+
+The detailed sections below are the historical 2026-08-16 snapshot and may list now-completed
+tasks as outstanding. Prefer ROADMAP_STATUS.md and this update for the current state.
 
 ## 1. What Is Implemented
 

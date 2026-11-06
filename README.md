@@ -143,11 +143,47 @@ python scripts/make_sample_data.py
 python -m pytest tests -q
 ```
 
-The suite covers analysis, the report layer, and the export dialog and worker. The running
-interface has not been checked by hand. `docs/MANUAL_TESTING.md` lists what to click and the
-numbers to expect.
+The suite covers analysis, reports, file schema/paging, cash estimates, categorisation,
+localisation, background workers and packaging source checks. Native startup and Russian
+controls were visually inspected on 2026-11-06; the full interactive workflow remains open.
+`docs/MANUAL_TESTING.md` lists what to click and the numbers to expect.
 
 ## Next Step
 
-Work through `docs/MANUAL_TESTING.md`, then translate the interface to Russian and package the
-application, so it can be put in front of real users.
+The original roadmap implementation was expanded on 2026-11-06:
+
+- Russian is the default desktop language; switching to English preserves the open file and results.
+- Select `Description (categorisation)` in the column dialog to derive Marketing, Sales, Rent,
+  Payroll, Inventory and Other categories using local RU/EN rules. Existing category columns remain separate.
+- Save, apply and delete reusable column mappings in local application settings. A mapping is
+  rejected if the current file lacks any saved columns.
+- Choose IQR/Z-score or deterministic Isolation Forest (at least eight finite periods).
+- Enter an optional current cash balance to estimate runway and the balance after 30 days.
+  These estimates use historical average net profit; undated money transactions suppress them.
+- The right panel includes the next-period forecast and cash summary. Reports include derived
+  categories and cash estimates too.
+- Cancel full-file analysis cooperatively; loading progress reports bytes for CSV and rows for Excel.
+- `View all rows...` opens a background-loaded, paged table model. Pages retain at most 1,000 rows;
+  moving to later pages scans earlier records again. The normal preview stays limited to 100 rows.
+- Blank/duplicate headers are normalized consistently across preview, analysis and browsing.
+
+The startup window has been inspected on Windows. Continue the full interactive checks in
+`docs/MANUAL_TESTING.md` before release. The current status is recorded in `docs/ROADMAP_STATUS.md`.
+
+## Windows Build
+
+```powershell
+pwsh -File scripts/build_windows.ps1 -InstallDependencies -Installer
+```
+
+This prepares a one-folder PyInstaller app and, with Inno Setup 6 installed, a per-user
+installer. The bundled synthetic demo and frozen smoke test exercise all five report formats.
+See `packaging/README.md` for prerequisites and `packaging/BUILD_STATUS.md` for actual verification.
+No EXE or installer has been produced on this machine: PyInstaller is missing, its download
+was blocked by unavailable PyPI DNS, and Inno Setup is absent.
+
+On a restricted Windows environment, run tests with an explicit writable temporary directory:
+
+```powershell
+./.venv/Scripts/python.exe -m pytest tests -q --basetemp .pytest-tmp-check
+```

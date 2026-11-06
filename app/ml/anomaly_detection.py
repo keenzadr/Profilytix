@@ -1,4 +1,4 @@
-"""Simple rule-based financial anomaly detection."""
+"""Rule-based and optional Isolation Forest financial anomaly detection."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ SERIES_DIRECTIONS = {
 Z_SCORE_THRESHOLD = 2.5
 IQR_MULTIPLIER = 1.5
 MIN_PERIODS_FOR_ANOMALIES = 4
+MIN_PERIODS_FOR_ISOLATION_FOREST = 8
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class FinancialAnomaly:
     score: float
     rule: str
     severity: str
+    category: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,8 +64,21 @@ class AnomalyDetectionResult:
 def detect_financial_anomalies(
     time_series: TimeSeriesResult,
     max_items: int = 8,
+    *,
+    method: str = "rules",
 ) -> AnomalyDetectionResult:
-    """Detect simple spikes and drops in aggregated chart data."""
+    """Detect spikes and drops using rules (4 periods) or Isolation Forest (8).
+
+    Each series needs that many finite observations. The optional ML method is
+    deterministic and ignores constant series; no anomaly quota is imposed.
+    """
+    if method not in ("rules", "isolation_forest"):
+        raise ValueError("Unknown anomaly method. Use 'rules' or 'isolation_forest'.")
+    min_periods = (
+        MIN_PERIODS_FOR_ISOLATION_FOREST
+        if method == "isolation_forest"
+        else MIN_PERIODS_FOR_ANOMALIES
+    )
     if not time_series.points:
         return AnomalyDetectionResult(
             anomalies=(),
@@ -71,12 +86,12 @@ def detect_financial_anomalies(
             message=time_series.message or "No chart data available for anomaly detection.",
         )
 
-    if len(time_series.points) < MIN_PERIODS_FOR_ANOMALIES:
+    if len(time_series.points) < min_periods:
         return AnomalyDetectionResult(
             anomalies=(),
             total_found=0,
             message=(
-                f"Need at least {MIN_PERIODS_FOR_ANOMALIES} periods to detect anomalies."
+                f"Need at least {min_periods} periods to detect anomalies."
             ),
         )
 
@@ -89,7 +104,10 @@ def detect_financial_anomalies(
 
     anomalies: list[FinancialAnomaly] = []
     for series_key in time_series.visible_series:
-        anomalies.extend(_detect_series_anomalies(time_series.points, series_key))
+        if method == "isolation_forest":
+            anomalies.extend(_detect_isolation_forest_anomalies(time_series.points, series_key))
+        else:
+            anomalies.extend(_detect_series_anomalies(time_series.points, series_key))
 
     anomalies.sort(
         key=lambda item: (item.score, abs(item.value - item.baseline)),
@@ -106,6 +124,58 @@ def detect_financial_anomalies(
         anomalies=tuple(anomalies[:max_items]),
         total_found=len(anomalies),
     )
+
+
+def _detect_isolation_forest_anomalies(
+    points: list[TimeSeriesPoint],
+    series_key: str,
+) -> list[FinancialAnomaly]:
+    """Fit one small deterministic forest and retain relevant financial directions."""
+    values_by_point = [
+        (point, value)
+        for point in points
+        if isfinite(value := _point_value(point, series_key))
+    ]
+    if len(values_by_point) < MIN_PERIODS_FOR_ISOLATION_FOREST:
+        return []
+
+    values = pd.Series([value for _point, value in values_by_point], dtype="float64")
+    # Scaling avoids sklearn's internal float32 conversion overflowing on large
+    # finite amounts, and suppresses numerically indistinguishable variation.
+    scale = float(values.abs().max())
+    if scale == 0:
+        return []
+    normalized = values / scale
+    if float(normalized.max() - normalized.min()) <= 1e-12:
+        return []
+
+    from sklearn.ensemble import IsolationForest
+
+    features = normalized.to_numpy().reshape(-1, 1)
+    forest = IsolationForest(contamination="auto", random_state=42, n_jobs=1)
+    predictions = forest.fit_predict(features)
+    scores = -forest.score_samples(features)
+    baseline = float(normalized.median()) * scale
+    allowed_directions = SERIES_DIRECTIONS.get(series_key, ())
+    anomalies = []
+    for (point, value), prediction, score in zip(values_by_point, predictions, scores):
+        if prediction != -1 or value == baseline:
+            continue
+        direction = "high" if value > baseline else "low"
+        if direction not in allowed_directions:
+            continue
+        anomalies.append(FinancialAnomaly(
+            period=point.period,
+            series_key=series_key,
+            series_label=SERIES_LABELS.get(series_key, series_key.title()),
+            kind=_anomaly_kind(series_key, direction),
+            value=value,
+            baseline=baseline,
+            score=float(score),
+            rule="Isolation Forest",
+            severity="High" if score >= 0.7 else "Medium",
+        ))
+    return anomalies
 
 
 def _detect_series_anomalies(

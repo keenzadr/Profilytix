@@ -10,10 +10,11 @@ window uses, so an exported report always agrees with what was on screen.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from app.analytics.metrics import BasicMetrics, format_money, format_number
+from app.analytics.cash_flow import CashFlowResult, calculate_cash_flow
 from app.analytics.time_series import TIME_GROUPINGS, TimeSeriesResult
 from app.ml.anomaly_detection import AnomalyDetectionResult
 from app.ml.forecasting import ForecastResult
@@ -55,17 +56,26 @@ def build_report(
     anomalies: AnomalyDetectionResult,
     request: ReportRequest,
     forecast: ForecastResult | None = None,
+    *,
+    cash_balance: float | None = None,
 ) -> ReportModel:
     """Turn analysis results into a model every writer can lay out."""
     language = request.language
+    cash = calculate_cash_flow(metrics, cash_balance)
+    cash_insights = ()
+    if cash.runway_days is not None:
+        cash_insights = (label(language, 'insight_runway').format(days=format_number(cash.runway_days)),)
+    if metrics.undated_money_rows:
+        cash_insights = (label(language, 'insight_undated_money').format(count=metrics.undated_money_rows),)
 
     return ReportModel(
         title=label(language, "report_title"),
         generated_at=datetime.now(),
         source=_build_source(metrics, request),
-        summary=_build_summary(metrics, request),
-        insights=generate_insights(metrics, time_series, anomalies, language, forecast),
+        summary=_build_summary(metrics, request, cash),
+        insights=cash_insights + generate_insights(metrics, time_series, anomalies, language, forecast),
         categories=_build_categories(metrics, request),
+        derived_categories=_build_derived_categories(metrics, request),
         anomalies=_build_anomalies(anomalies, request),
         periods=_build_periods(time_series, request) if request.is_detailed else None,
         forecast=_build_forecast(forecast, request),
@@ -125,7 +135,7 @@ def _build_source(metrics: BasicMetrics, request: ReportRequest) -> ReportSectio
     return ReportSection(title=label(language, "section_source"), rows=tuple(rows))
 
 
-def _build_summary(metrics: BasicMetrics, request: ReportRequest) -> ReportSection:
+def _build_summary(metrics: BasicMetrics, request: ReportRequest, cash: CashFlowResult | None = None) -> ReportSection:
     """Build the metric list at the requested depth."""
     language = request.language
     amount_only = _is_amount_only(metrics)
@@ -151,6 +161,13 @@ def _build_summary(metrics: BasicMetrics, request: ReportRequest) -> ReportSecti
                 _money(metrics.average_daily_profit, language),
             )
         )
+
+    if cash is not None and cash.cash_balance is not None:
+        rows.append((label(language, 'metric_cash_balance'), _money(cash.cash_balance, language)))
+        if cash.runway_days is not None:
+            rows.append((label(language, 'metric_runway'), format_number(cash.runway_days)))
+        if cash.projected_balance_30_days is not None:
+            rows.append((label(language, 'metric_balance_30_days'), _money(cash.projected_balance_30_days, language)))
 
     if not request.is_detailed:
         return ReportSection(title=label(language, "section_summary"), rows=tuple(rows))
@@ -211,6 +228,15 @@ def _build_summary(metrics: BasicMetrics, request: ReportRequest) -> ReportSecti
     return ReportSection(title=label(language, "section_summary"), rows=tuple(rows))
 
 
+def _build_derived_categories(metrics: BasicMetrics, request: ReportRequest) -> ReportTable | None:
+    """Keep inferred categories separate from user-provided dimensions."""
+    if not metrics.derived_categories:
+        return None
+    translated = tuple(replace(item, name=label(request.language, f'category_{item.name}')) for item in metrics.derived_categories)
+    table = _build_categories(replace(metrics, top_categories=translated), request)
+    return replace(table, title=label(request.language, 'section_derived_categories')) if table is not None else None
+
+
 def _build_categories(metrics: BasicMetrics, request: ReportRequest) -> ReportTable | None:
     """Build the category breakdown, or nothing when no categories were selected."""
     if not metrics.top_categories:
@@ -258,6 +284,7 @@ def _build_anomalies(
     if not request.is_detailed:
         items = items[:BRIEF_ANOMALY_LIMIT]
 
+    with_categories = any(item.category for item in items)
     rows = tuple(
         (
             f"{anomaly.period:{DATE_FORMAT}}",
@@ -266,7 +293,7 @@ def _build_anomalies(
             _money(anomaly.value, language),
             _money(anomaly.baseline, language),
             label(language, _severity_key(anomaly.severity)),
-        )
+        ) + ((anomaly.category or label(language, 'not_available'),) if with_categories else ())
         for anomaly in items
     )
 
@@ -279,7 +306,7 @@ def _build_anomalies(
             label(language, "header_value"),
             label(language, "header_baseline"),
             label(language, "header_severity"),
-        ),
+        ) + ((label(language, 'header_category_context'),) if with_categories else ()),
         rows=rows,
     )
 
@@ -334,7 +361,7 @@ def _build_chart(
     """Render the chart image, unless the caller asked to skip it."""
     if not request.include_chart:
         return None
-    return render_chart_png(time_series, anomalies, forecast)
+    return render_chart_png(time_series, anomalies, forecast, language=request.language)
 
 
 def _build_period_text(value: datetime | None) -> str:

@@ -182,6 +182,8 @@ def _burn_rate_and_cash_gap(
 ) -> tuple[str, ...]:
     """Report the daily burn rate, and warn when the average day loses money."""
     sentences: list[str] = []
+    if metrics.undated_money_rows:
+        return ()
 
     daily_expense = metrics.average_daily_expense
     if daily_expense is not None and isfinite(daily_expense) and daily_expense > 0:

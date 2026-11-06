@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import codecs
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -48,6 +50,16 @@ BOOLEAN_VALUES = {"true", "false", "yes", "no", "да", "нет", "истина"
 
 class FileLoadError(Exception):
     """Raised when a file cannot be previewed as a table."""
+
+
+@dataclass(frozen=True)
+class TableSchema:
+    """Display names in physical-column order, independent of reader naming."""
+
+    column_names: list[str]
+    has_header: bool
+    encoding: str | None = None
+    delimiter: str | None = None
 
 
 @dataclass(frozen=True)
@@ -166,7 +178,10 @@ def _load_csv_preview_with_polars(
             "`pip install -r requirements.txt`."
         )
 
-    has_header = True
+    schema = _read_csv_schema(path, encoding, delimiter)
+    if not schema.column_names:
+        return LoadedFile(path, [], [], file_size, total_rows=0, encoding=encoding,
+                          delimiter=_display_delimiter(delimiter), reader="Polars CSV")
     try:
         frame = pl.read_csv(
             str(path),
@@ -178,37 +193,16 @@ def _load_csv_preview_with_polars(
             try_parse_dates=False,
             truncate_ragged_lines=True,
             rechunk=False,
+            has_header=schema.has_header,
         )
     except Exception as error:
         raise FileLoadError(f"Could not read CSV preview: {error}") from error
-
-    if _headers_look_like_data([str(column) for column in frame.columns]):
-        has_header = False
-        try:
-            frame = pl.read_csv(
-                str(path),
-                separator=delimiter,
-                encoding=_polars_encoding(encoding),
-                n_rows=PREVIEW_READ_LIMIT,
-                infer_schema=False,
-                infer_schema_length=PREVIEW_READ_LIMIT,
-                try_parse_dates=False,
-                truncate_ragged_lines=True,
-                rechunk=False,
-                has_header=False,
-            )
-        except Exception as error:
-            raise FileLoadError(f"Could not read CSV preview: {error}") from error
 
     has_more_rows = frame.height > PREVIEW_ROW_LIMIT
     preview_frame = frame.head(PREVIEW_ROW_LIMIT)
     preview_rows = _rows_from_iterable(preview_frame.iter_rows())
     total_rows = None if has_more_rows else preview_frame.height
-    column_names = (
-        [str(column) for column in preview_frame.columns]
-        if has_header
-        else _generic_column_names(preview_frame.width)
-    )
+    column_names = schema.column_names
 
     return LoadedFile(
         path=path,
@@ -236,7 +230,10 @@ def _load_csv_preview_with_pandas(
             "Missing CSV dependency: pandas. Run `pip install -r requirements.txt`."
         ) from error
 
-    has_header = True
+    schema = _read_csv_schema(path, encoding, delimiter)
+    if not schema.column_names:
+        return LoadedFile(path, [], [], file_size, total_rows=0, encoding=encoding,
+                          delimiter=_display_delimiter(delimiter), reader="pandas CSV fallback")
     try:
         frame = pd.read_csv(
             path,
@@ -247,35 +244,15 @@ def _load_csv_preview_with_pandas(
             keep_default_na=False,
             engine="c",
             on_bad_lines="skip",
+            header=0 if schema.has_header else None,
         )
     except Exception as error:
         raise FileLoadError(f"Could not read CSV preview: {error}") from error
 
-    if _headers_look_like_data([str(column) for column in frame.columns]):
-        has_header = False
-        try:
-            frame = pd.read_csv(
-                path,
-                sep=delimiter,
-                encoding=encoding,
-                nrows=PREVIEW_READ_LIMIT,
-                dtype=str,
-                keep_default_na=False,
-                engine="c",
-                on_bad_lines="skip",
-                header=None,
-            )
-        except Exception as error:
-            raise FileLoadError(f"Could not read CSV preview: {error}") from error
-
     has_more_rows = len(frame) > PREVIEW_ROW_LIMIT
     preview_frame = frame.head(PREVIEW_ROW_LIMIT)
     total_rows = None if has_more_rows else len(preview_frame)
-    column_names = (
-        [str(column) for column in preview_frame.columns]
-        if has_header
-        else _generic_column_names(len(preview_frame.columns))
-    )
+    column_names = schema.column_names
 
     return LoadedFile(
         path=path,
@@ -291,115 +268,25 @@ def _load_csv_preview_with_pandas(
 
 def _load_xlsx_preview(path: Path) -> LoadedFile:
     """Load the first rows of an XLSX file using openpyxl read-only mode."""
-    file_size = path.stat().st_size
-
-    try:
-        from openpyxl import load_workbook
-    except ImportError as error:
-        raise FileLoadError(
-            "Missing Excel dependency: openpyxl. Run `pip install -r requirements.txt`."
-        ) from error
-
-    try:
-        workbook = load_workbook(path, read_only=True, data_only=True)
-    except Exception as error:
-        raise FileLoadError(f"Could not open Excel file: {error}") from error
-
-    try:
-        if not workbook.worksheets:
-            return LoadedFile(
-                path=path,
-                column_names=[],
-                preview_rows=[],
-                file_size_bytes=file_size,
-                total_rows=0,
-                reader="openpyxl read-only",
-            )
-
-        sheet = workbook.worksheets[0]
-        row_iterator = sheet.iter_rows(values_only=True)
-        header = next(row_iterator, None)
-        if header is None:
-            return LoadedFile(
-                path=path,
-                column_names=[],
-                preview_rows=[],
-                file_size_bytes=file_size,
-                total_rows=0,
-                reader="openpyxl read-only",
-            )
-
-        column_count = max(sheet.max_column or 0, len(header))
-        header_values = _normalize_row(header, column_count)
-        if _headers_look_like_data(header_values):
-            column_names = _generic_column_names(column_count)
-            preview_rows = [header_values]
-            preview_rows.extend(
-                _normalize_row(row, column_count)
-                for row in islice(row_iterator, PREVIEW_ROW_LIMIT - 1)
-            )
-            total_rows = sheet.max_row
-        else:
-            column_names = _column_names_from_header(header, column_count)
-            preview_rows = [
-                _normalize_row(row, column_count)
-                for row in islice(row_iterator, PREVIEW_ROW_LIMIT)
-            ]
-            total_rows = max((sheet.max_row or 1) - 1, 0)
-
-        return LoadedFile(
-            path=path,
-            column_names=column_names,
-            preview_rows=preview_rows,
-            file_size_bytes=file_size,
-            total_rows=total_rows,
-            reader="openpyxl read-only",
-        )
-    finally:
-        workbook.close()
+    return _load_excel_preview(path, "openpyxl read-only")
 
 
 def _load_xls_preview(path: Path) -> LoadedFile:
-    """Load the first rows of an XLS file without reading the whole workbook."""
-    file_size = path.stat().st_size
+    """Load first-sheet XLS rows through the shared physical-column reader."""
+    return _load_excel_preview(path, "xlrd first sheet")
 
-    try:
-        import pandas as pd
-    except ImportError as error:
-        raise FileLoadError(
-            "Missing Excel dependency: pandas. Run `pip install -r requirements.txt`."
-        ) from error
 
-    has_header = True
+def _load_excel_preview(path: Path, reader: str) -> LoadedFile:
     try:
-        frame = pd.read_excel(path, sheet_name=0, nrows=PREVIEW_READ_LIMIT)
+        with _open_excel_rows(path) as (schema, records, total):
+            rows = [_normalize_row(row, len(schema.column_names))
+                    for row in islice(records, PREVIEW_ROW_LIMIT)]
+            return LoadedFile(path, schema.column_names, rows, path.stat().st_size,
+                              total_rows=total, reader=reader)
+    except FileLoadError:
+        raise
     except Exception as error:
         raise FileLoadError(f"Could not read Excel preview: {error}") from error
-
-    if _headers_look_like_data([str(column) for column in frame.columns]):
-        has_header = False
-        try:
-            frame = pd.read_excel(path, sheet_name=0, nrows=PREVIEW_READ_LIMIT, header=None)
-        except Exception as error:
-            raise FileLoadError(f"Could not read Excel preview: {error}") from error
-
-    has_more_rows = len(frame) > PREVIEW_ROW_LIMIT
-    preview_frame = frame.head(PREVIEW_ROW_LIMIT)
-    total_rows = None if has_more_rows else len(preview_frame)
-    column_names = (
-        [str(column) for column in preview_frame.columns]
-        if has_header
-        else _generic_column_names(len(preview_frame.columns))
-    )
-
-    return LoadedFile(
-        path=path,
-        column_names=column_names,
-        preview_rows=_rows_from_iterable(preview_frame.itertuples(index=False, name=None)),
-        file_size_bytes=file_size,
-        total_rows=total_rows,
-        reader="pandas Excel preview",
-    )
 
 
 def _detect_csv_encoding(path: Path) -> tuple[str, str]:
@@ -409,7 +296,9 @@ def _detect_csv_encoding(path: Path) -> tuple[str, str]:
 
     for encoding in CSV_ENCODINGS:
         try:
-            return encoding, sample_bytes.decode(encoding)
+            # The sample can stop halfway through a UTF-8 character.
+            decoder = codecs.getincrementaldecoder(encoding)()
+            return encoding, decoder.decode(sample_bytes, final=len(sample_bytes) < SAMPLE_BYTES)
         except UnicodeDecodeError as error:
             last_error = error
 
@@ -512,13 +401,99 @@ def _looks_like_data_value(value: str) -> bool:
 
 
 def _column_names_from_header(header: tuple[Any, ...], column_count: int) -> list[str]:
-    """Create display-safe column names from a spreadsheet header row."""
+    """Create unique names while reserving all explicitly named columns."""
+    raw_names = [_format_cell(header[index] if index < len(header) else None).strip().lstrip("\ufeff").strip()
+                 for index in range(column_count)]
+    reserved = {name for name in raw_names if name}
+    used: set[str] = set()
     names: list[str] = []
-    for index in range(column_count):
-        value = header[index] if index < len(header) else None
-        text = _format_cell(value).strip()
-        names.append(text or f"Column {index + 1}")
+    for index, original in enumerate(raw_names):
+        base = original or f"Column {index + 1}"
+        name = base
+        suffix = 2
+        while name in used or (not original and name in reserved) or (name != base and name in reserved):
+            name = f"{base} ({suffix})"
+            suffix += 1
+        names.append(name)
+        used.add(name)
     return names
+
+
+def _schema_from_header(header: tuple[Any, ...], column_count: int) -> TableSchema:
+    """Make the same header decision for preview, analysis and paging."""
+    candidates = _normalize_row(header, column_count)
+    if candidates:
+        candidates[0] = candidates[0].strip().lstrip("\ufeff").strip()
+    has_header = not _headers_look_like_data(candidates)
+    names = (_column_names_from_header(header, column_count) if has_header
+             else _generic_column_names(column_count))
+    return TableSchema(names, has_header)
+
+
+def _read_csv_schema(path: Path, encoding: str | None = None,
+                     delimiter: str | None = None) -> TableSchema:
+    """Read the first physical CSV record without library-mangled headers."""
+    if encoding is None or delimiter is None:
+        encoding, sample = _detect_csv_encoding(path)
+        delimiter = _detect_csv_delimiter(sample)
+    try:
+        with path.open("r", encoding=encoding, newline="") as source:
+            header = next((row for row in csv.reader(source, delimiter=delimiter) if row), [])
+    except (OSError, UnicodeError, csv.Error) as error:
+        raise FileLoadError(f"Could not read CSV header: {error}") from error
+    schema = _schema_from_header(tuple(header), len(header))
+    return TableSchema(schema.column_names, schema.has_header, encoding, delimiter)
+
+
+@contextmanager
+def _open_excel_rows(path: Path):
+    """Yield a schema and lazy rows from the first sheet, closing on every exit."""
+    if path.suffix.lower() == ".xlsx":
+        from openpyxl import load_workbook
+
+        try:
+            workbook = load_workbook(path, read_only=True, data_only=True)
+        except Exception as error:
+            raise FileLoadError(f"Could not open Excel file: {error}") from error
+        try:
+            if not workbook.worksheets:
+                yield TableSchema([], False), iter(()), 0
+                return
+            sheet = workbook.worksheets[0]
+            rows = sheet.iter_rows(values_only=True)
+            first = next(rows, None)
+            if first is None:
+                yield TableSchema([], False), iter(()), 0
+                return
+            schema = _schema_from_header(first, max(sheet.max_column or 0, len(first)))
+            from itertools import chain
+            data_rows = rows if schema.has_header else chain([first], rows)
+            total = max((sheet.max_row or 0) - int(schema.has_header), 0)
+            yield schema, data_rows, total
+        finally:
+            workbook.close()
+    else:
+        import xlrd
+
+        try:
+            workbook = xlrd.open_workbook(str(path), on_demand=True)
+        except Exception as error:
+            raise FileLoadError(f"Could not open Excel file: {error}") from error
+        try:
+            if not workbook.nsheets:
+                yield TableSchema([], False), iter(()), 0
+                return
+            sheet = workbook.sheet_by_index(0)
+            def row_values(index):
+                return tuple(xlrd.xldate_as_datetime(cell.value, workbook.datemode)
+                             if cell.ctype == xlrd.XL_CELL_DATE else cell.value
+                             for cell in sheet.row(index))
+            first = row_values(0) if sheet.nrows else ()
+            schema = _schema_from_header(first, sheet.ncols)
+            start = int(schema.has_header) if sheet.nrows else 0
+            yield schema, (row_values(index) for index in range(start, sheet.nrows)), sheet.nrows - start
+        finally:
+            workbook.release_resources()
 
 
 def _normalize_row(row: tuple[Any, ...], column_count: int) -> list[str]:

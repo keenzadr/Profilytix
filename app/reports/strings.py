@@ -169,6 +169,34 @@ LABELS: dict[str, dict[str, str]] = {
 }
 
 
+LABELS['ru'].update({
+    'insight_undated_money': 'Операций с суммой без корректной даты: {count}. Оценка запаса денег недоступна, пока даты не исправлены.',
+    'section_derived_categories': 'Категории по описанию',
+    'metric_cash_balance': 'Текущий остаток денег',
+    'metric_runway': 'Запас денег, дней',
+    'metric_balance_30_days': 'Остаток через 30 дней (оценка)',
+    'insight_runway': 'При сохранении средней дневной убыли текущего остатка хватит примерно на {days} дней. Это оценка по историческим данным.',
+    'header_category_context': 'Наибольшее изменение категории',
+    'category_Marketing': 'Маркетинг', 'category_Sales': 'Продажи',
+    'category_Rent': 'Аренда', 'category_Payroll': 'Зарплата',
+    'category_Inventory': 'Закупки', 'category_Other': 'Прочее',
+    'chart_anomaly': 'Аномалия', 'chart_forecast': 'Прогноз',
+})
+LABELS['en'].update({
+    'insight_undated_money': 'There are {count} undated money transactions. Cash runway is unavailable until their dates are corrected.',
+    'section_derived_categories': 'Categories from descriptions',
+    'metric_cash_balance': 'Current cash balance',
+    'metric_runway': 'Cash runway, days',
+    'metric_balance_30_days': 'Balance in 30 days (estimate)',
+    'insight_runway': 'At the historical average daily loss, the current balance would last about {days} days. This is an estimate from historical data.',
+    'header_category_context': 'Largest category change',
+    'category_Marketing': 'Marketing', 'category_Sales': 'Sales',
+    'category_Rent': 'Rent', 'category_Payroll': 'Payroll',
+    'category_Inventory': 'Inventory', 'category_Other': 'Other',
+    'chart_anomaly': 'Anomaly', 'chart_forecast': 'Forecast',
+})
+
+
 # Anomaly detection labels its series in English for the UI. Reports translate
 # them from the series key instead, so a Russian report does not say
 # "spike in Expenses".

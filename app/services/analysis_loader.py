@@ -1,26 +1,31 @@
-"""Full-file loading for metric analysis."""
+"""Full-file loading for metric analysis with cooperative cancellation."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-import re
 
 import pandas as pd
 
-from app.analytics.metrics import (
-    BasicMetrics,
-    SelectedColumns,
-    calculate_basic_metrics,
-)
+from app.analytics.metrics import BasicMetrics, SelectedColumns, calculate_basic_metrics
 from app.services.file_loader import (
+    SUPPORTED_EXTENSIONS,
     FileLoadError,
-    _detect_csv_delimiter,
-    _detect_csv_encoding,
+    TableSchema,
+    _open_excel_rows,
     _polars_encoding,
+    _read_csv_schema,
 )
 
 
-SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+ProgressCallback = Callable[[int, int, str], None]
+CancellationCallback = Callable[[], bool]
+CSV_CHUNK_ROWS = 5000
+EXCEL_PROGRESS_ROWS = 500
+
+
+class AnalysisCancelled(Exception):
+    """Raised when loading is cancelled; no partial data is published."""
 
 
 def calculate_file_metrics(file_path: str | Path, selected_columns: SelectedColumns) -> BasicMetrics:
@@ -29,126 +34,124 @@ def calculate_file_metrics(file_path: str | Path, selected_columns: SelectedColu
     return calculate_basic_metrics(data, selected_columns)
 
 
-def load_selected_columns(file_path: str | Path, selected_columns: SelectedColumns) -> pd.DataFrame:
-    """Load only selected columns needed for analysis."""
-    path = Path(file_path)
-    extension = path.suffix.lower()
+def load_selected_columns(
+    file_path: str | Path,
+    selected_columns: SelectedColumns,
+    *,
+    progress: ProgressCallback | None = None,
+    cancelled: CancellationCallback | None = None,
+) -> pd.DataFrame:
+    """Load physical columns with measured I/O progress and cancellation.
 
+    CSV progress counts bytes consumed by the parser (which can read ahead).
+    Excel progress counts processed data rows. Cancellation is checked before
+    work, between chunks/rows, and before returning the completed frame.
+    """
+    _check_cancelled(cancelled)
+    path = Path(file_path)
     if not path.is_file():
         raise FileLoadError("Selected path is not a readable file.")
-    if extension not in SUPPORTED_EXTENSIONS:
+    if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
         raise FileLoadError(f"Unsupported file type. Please choose one of: {supported}.")
-
     columns = _selected_column_names(selected_columns)
     if not columns:
         raise FileLoadError("Select at least a revenue, expenses, or amount column before analysis.")
-
-    if extension == ".csv":
-        return _load_csv_selected_columns(path, columns)
-    if extension == ".xlsx":
-        return _load_excel_selected_columns(path, columns)
-    return _load_excel_selected_columns(path, columns)
+    try:
+        if path.suffix.lower() == ".csv":
+            data = _load_csv_selected_columns(path, columns, progress, cancelled)
+        else:
+            data = _load_excel_selected_columns(path, columns, progress, cancelled)
+    except (AnalysisCancelled, FileLoadError):
+        raise
+    except Exception as error:
+        raise FileLoadError(f"Could not read selected columns: {error}") from error
+    _check_cancelled(cancelled)
+    return data
 
 
 def _selected_column_names(selected_columns: SelectedColumns) -> list[str]:
-    """Return selected column names without duplicates."""
-    names = [
-        *selected_columns.date,
-        *selected_columns.revenue,
-        *selected_columns.expense,
-        *selected_columns.amount,
-        *selected_columns.category,
-    ]
+    """Return selected names without duplicates, in selection order."""
+    names = [*selected_columns.date, *selected_columns.revenue, *selected_columns.expense,
+             *selected_columns.amount, *selected_columns.category,
+             *getattr(selected_columns, "description", ())]
     return list(dict.fromkeys(names))
 
 
-def _load_csv_selected_columns(path: Path, columns: list[str]) -> pd.DataFrame:
-    """Load selected CSV columns, preferring Polars for speed."""
-    encoding, sample_text = _detect_csv_encoding(path)
-    delimiter = _detect_csv_delimiter(sample_text)
-    has_generic_columns = all(_is_generic_column_name(column) for column in columns)
+def _column_indexes(schema: TableSchema, columns: list[str]) -> list[int]:
+    """Resolve display names against the schema, never their spelling."""
+    missing = [name for name in columns if name not in schema.column_names]
+    if missing:
+        raise FileLoadError(f"Selected columns are missing from the file: {', '.join(missing)}")
+    return [schema.column_names.index(name) for name in columns]
 
-    try:
-        import polars as pl
 
-        if hasattr(pl, "read_csv"):
+def _load_csv_selected_columns(path, columns, progress=None, cancelled=None) -> pd.DataFrame:
+    schema = _read_csv_schema(path)
+    indexes = sorted(_column_indexes(schema, columns))
+    physical_names = {index: schema.column_names[index] for index in indexes}
+    if progress is None and cancelled is None:
+        try:
+            import polars as pl
+
             frame = pl.read_csv(
-                str(path),
-                separator=delimiter,
-                encoding=_polars_encoding(encoding),
-                columns=None if has_generic_columns else columns,
-                has_header=not has_generic_columns,
-                infer_schema=False,
-                try_parse_dates=False,
-                truncate_ragged_lines=True,
-                rechunk=False,
+                str(path), separator=schema.delimiter, encoding=_polars_encoding(schema.encoding),
+                columns=indexes, has_header=schema.has_header, infer_schema=False,
+                try_parse_dates=False, truncate_ragged_lines=True, rechunk=False,
             )
-            if has_generic_columns:
-                all_column_names = _generic_column_names(frame.width)
-                frame.columns = all_column_names
-                frame = frame.select(columns)
-            return _pandas_from_polars(frame)
-    except Exception:
-        pass
-
-    if has_generic_columns:
-        frame = pd.read_csv(
-            path,
-            sep=delimiter,
-            encoding=encoding,
-            usecols=_column_indexes(columns),
-            header=None,
-            dtype=str,
-            keep_default_na=False,
-            engine="c",
-            on_bad_lines="skip",
-        )
-        return _rename_indexed_columns(frame, columns)
-
-    return pd.read_csv(
-        path,
-        sep=delimiter,
-        encoding=encoding,
-        usecols=columns,
-        dtype=str,
-        keep_default_na=False,
-        engine="c",
-        on_bad_lines="skip",
+            frame.columns = [physical_names[index] for index in indexes]
+            return pd.DataFrame(frame.to_dict(as_series=False)).loc[:, columns]
+        except Exception:
+            # pandas supports encodings unsupported by some Polars versions.
+            pass
+    read_options = dict(
+        sep=schema.delimiter, encoding=schema.encoding, usecols=indexes,
+        header=0 if schema.has_header else None, dtype=str, keep_default_na=False,
+        engine="c", on_bad_lines="skip",
     )
+    if progress is None and cancelled is None:
+        frame = pd.read_csv(path, **read_options)
+        frame.columns = [physical_names[index] for index in indexes]
+        return frame.loc[:, columns]
+    total = path.stat().st_size
+    _report_progress(progress, 0, total, "bytes", cancelled)
+    chunks = []
+    # The parser may read ahead; the offset is actual bytes read, never an
+    # assumed percentage or estimated bytes per row.
+    with path.open("rb") as source:
+        with pd.read_csv(source, chunksize=CSV_CHUNK_ROWS, **read_options) as reader:
+            for chunk in reader:
+                _check_cancelled(cancelled)
+                chunk.columns = [physical_names[index] for index in indexes]
+                chunks.append(chunk)
+                _report_progress(progress, source.tell(), total, "bytes", cancelled)
+    frame = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame(columns=physical_names.values())
+    _report_progress(progress, total, total, "bytes", cancelled)
+    return frame.loc[:, columns]
 
 
-def _load_excel_selected_columns(path: Path, columns: list[str]) -> pd.DataFrame:
-    """Load selected Excel columns, handling generated Column N names."""
-    has_generic_columns = all(_is_generic_column_name(column) for column in columns)
-    if has_generic_columns:
-        frame = pd.read_excel(path, sheet_name=0, usecols=_column_indexes(columns), header=None)
-        return _rename_indexed_columns(frame, columns)
-    return pd.read_excel(path, sheet_name=0, usecols=columns)
+def _load_excel_selected_columns(path, columns, progress=None, cancelled=None) -> pd.DataFrame:
+    with _open_excel_rows(path) as (schema, rows, total):
+        indexes = _column_indexes(schema, columns)
+        _report_progress(progress, 0, total, "rows", cancelled)
+        values = []
+        done = 0
+        for done, row in enumerate(rows, start=1):
+            _check_cancelled(cancelled)
+            values.append([row[index] if index < len(row) else None for index in indexes])
+            if done % EXCEL_PROGRESS_ROWS == 0:
+                _report_progress(progress, done, total, "rows", cancelled)
+        _report_progress(progress, done, max(total, done), "rows", cancelled)
+        return pd.DataFrame(values, columns=columns)
 
 
-def _pandas_from_polars(frame: object) -> pd.DataFrame:
-    """Convert a selected Polars frame to pandas without requiring pyarrow."""
-    return pd.DataFrame(frame.to_dict(as_series=False))
+def _check_cancelled(cancelled):
+    if cancelled is not None and cancelled():
+        raise AnalysisCancelled("Analysis was cancelled.")
 
 
-def _is_generic_column_name(column_name: str) -> bool:
-    """Return whether a column name follows the generated Column N pattern."""
-    return bool(re.fullmatch(r"Column \d+", column_name))
-
-
-def _generic_column_names(column_count: int) -> list[str]:
-    """Create generic Column N names."""
-    return [f"Column {index + 1}" for index in range(column_count)]
-
-
-def _column_indexes(columns: list[str]) -> list[int]:
-    """Convert generated Column N names to zero-based indexes."""
-    return [int(column_name.split()[-1]) - 1 for column_name in columns]
-
-
-def _rename_indexed_columns(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-    """Rename index-selected generic columns and keep the user's selected order."""
-    index_to_name = dict(zip(_column_indexes(columns), columns))
-    renamed = frame.rename(columns=index_to_name)
-    return renamed.loc[:, columns]
+def _report_progress(progress, done, total, unit, cancelled):
+    _check_cancelled(cancelled)
+    if progress is not None:
+        progress(done, total, unit)
+    _check_cancelled(cancelled)

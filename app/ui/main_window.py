@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 
-from PySide6.QtCore import QObject, QSettings, QThread, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -62,6 +64,8 @@ from app.analytics.time_series import (
     TimeSeriesResult,
     calculate_time_series,
 )
+from app.analytics.anomaly_context import add_category_context
+from app.analytics.cash_flow import calculate_cash_flow
 from app.ml.anomaly_detection import (
     AnomalyDetectionResult,
     FinancialAnomaly,
@@ -78,7 +82,12 @@ from app.reports.chart_image import (
 )
 from app.reports.writers import WRITERS, ReportExportError, write_report
 from app.ui.export_dialog import ExportDialog, ExportOptions
-from app.services.analysis_loader import load_selected_columns
+from app.ui.analysis_options import AnalysisOptionsWidget
+from app.ui.table_browser import TableBrowserDialog
+from app.ui.strings import normalize_language, tr
+from app.services.analysis_loader import AnalysisCancelled, load_selected_columns
+from app.services.mapping_profiles import MappingProfiles, MissingProfileColumns
+from app.reports.strings import label as report_label, series_label
 from app.services.file_loader import (
     FileLoadError,
     LoadedFile,
@@ -89,8 +98,51 @@ from app.services.file_loader import (
 
 # Analysis keeps a wider category breakdown than the panel shows, because a
 # detailed exported report wants the full list.
-ANALYSIS_CATEGORY_LIMIT = 25
+ANALYSIS_CATEGORY_LIMIT = None
 UI_CATEGORY_LIMIT = 5
+SELECTION_ROLES = (*COLUMN_ROLES, 'description')
+SELECTION_LABELS = {**ROLE_LABELS, 'description': 'Description (categorisation)'}
+
+
+def _set_ui_text(widget: QWidget, template: str, language: str, **values: object) -> None:
+    """Remember a translated label's template for a later language change."""
+    widget.setProperty("translation_template", template)
+    widget.setProperty("translation_values", values)
+    widget.setText(tr(template, language, **values))
+
+
+def _ui_widget(widget: QWidget, template: str, language: str) -> QWidget:
+    """Label an existing Qt control without changing its identity or state."""
+    _set_ui_text(widget, template, language)
+    return widget
+
+
+def _localize_chart(axes: object, series: TimeSeriesResult, language: str) -> None:
+    """Translate the UI chart artists without affecting exported report charts."""
+    if language == "en":
+        return
+    for line in axes.lines:
+        label = line.get_label()
+        if label in (*CHART_SERIES_LABELS.values(), "Anomaly", "Forecast"):
+            line.set_label(tr(label, language))
+    labels = [tr(CHART_SERIES_LABELS[key], language) for key in series.visible_series]
+    title = tr("{series} by {group}", language, series=", ".join(labels), group=tr(TIME_GROUPINGS[series.grouping], language).lower())
+    axes.set_title(title)
+    axes.legend(loc="best")
+
+
+def _translate_candidate_reason(reason: str, language: str) -> str:
+    """Translate detector-owned reason tokens while preserving keyword values."""
+    parts = []
+    for part in reason.split(", "):
+        for prefix in ("exact keyword", "partial keyword", "generic amount keyword"):
+            if part.startswith(prefix + ": "):
+                part = tr(prefix + ": {keyword}", language, keyword=part[len(prefix) + 2:])
+                break
+        else:
+            part = tr(part, language)
+        parts.append(part)
+    return ", ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -101,6 +153,7 @@ class AnalysisResult:
     time_series: TimeSeriesResult
     anomalies: AnomalyDetectionResult
     forecast: ForecastResult | None = None
+    cash_balance: float | None = None
 
 
 @dataclass
@@ -115,6 +168,7 @@ class ChartHoverState:
     markers: list[object]
     labels: list[object]
     date_label: object
+    language: str = "en"
     is_visible: bool = False
 
 
@@ -126,21 +180,22 @@ class FilePreviewWorker(QObject):
     status_changed = Signal(str)
     finished = Signal()
 
-    def __init__(self, file_path: str) -> None:
+    def __init__(self, file_path: str, language: str = "en") -> None:
         super().__init__()
         self.file_path = file_path
+        self.language = language
 
     @Slot()
     def run(self) -> None:
         """Load the selected file preview and report the result."""
         try:
             path = Path(self.file_path)
-            self.status_changed.emit(f"Loading preview for {path.name}...")
+            self.status_changed.emit(tr("Loading preview for {name}...", self.language, name=path.name))
             loaded_file = load_file_preview(path)
         except FileLoadError as error:
             self.failed.emit(str(error))
         except Exception as error:
-            self.failed.emit(f"Unexpected error while loading file: {error}")
+            self.failed.emit(tr("Unexpected error while loading file: {error}", self.language, error=error))
         else:
             self.loaded.emit(loaded_file)
         finally:
@@ -154,6 +209,8 @@ class AnalysisWorker(QObject):
     failed = Signal(str)
     status_changed = Signal(str)
     finished = Signal()
+    cancelled = Signal()
+    progress_changed = Signal(object, object, str)
 
     def __init__(
         self,
@@ -161,32 +218,58 @@ class AnalysisWorker(QObject):
         selected_columns: SelectedColumns,
         grouping: str,
         week_start: str,
+        language: str = "en",
+        cash_balance: float | None = None,
+        anomaly_method: str = 'rules',
     ) -> None:
         super().__init__()
         self.file_path = file_path
         self.selected_columns = selected_columns
         self.grouping = grouping
         self.week_start = week_start
+        self.language = language
+        self.cash_balance = cash_balance
+        self.anomaly_method = anomaly_method
+        self._cancel_event = Event()
+
+    def cancel(self) -> None:
+        """Safe to call directly from the UI thread while run() is busy."""
+        self._cancel_event.set()
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_event.is_set():
+            raise AnalysisCancelled()
 
     @Slot()
     def run(self) -> None:
         """Load selected columns and calculate metrics."""
         try:
             path = Path(self.file_path)
-            self.status_changed.emit(f"Analyzing {path.name}...")
-            data = load_selected_columns(path, self.selected_columns)
+            self.status_changed.emit(tr("Analyzing {name}...", self.language, name=path.name))
+            data = load_selected_columns(path, self.selected_columns, progress=self.progress_changed.emit, cancelled=self._cancel_event.is_set)
+            self._check_cancelled()
+            self.status_changed.emit(tr('Calculating metrics...', self.language))
             prepared = prepare_financial_data(data, self.selected_columns)
+            self._check_cancelled()
             metrics = calculate_basic_metrics_from_prepared(
                 prepared,
                 category_limit=ANALYSIS_CATEGORY_LIMIT,
             )
             time_series = calculate_time_series(prepared, self.grouping, self.week_start)
-            anomalies = detect_financial_anomalies(time_series)
+            self._check_cancelled()
+            anomalies = detect_financial_anomalies(time_series, max_items=1000000, method=self.anomaly_method)
+            anomalies = add_category_context(anomalies, prepared, self.grouping, self.week_start, cancelled=self._cancel_event.is_set)
+            self._check_cancelled()
             forecast = forecast_time_series(time_series)
+            calculate_cash_flow(metrics, self.cash_balance)
+            self._check_cancelled()
+        except AnalysisCancelled:
+            self.cancelled.emit()
+            return
         except FileLoadError as error:
             self.failed.emit(str(error))
         except Exception as error:
-            self.failed.emit(f"Unexpected error while analyzing file: {error}")
+            self.failed.emit(tr("Unexpected error while analyzing file: {error}", self.language, error=error))
         else:
             self.completed.emit(
                 AnalysisResult(
@@ -194,6 +277,7 @@ class AnalysisWorker(QObject):
                     time_series=time_series,
                     anomalies=anomalies,
                     forecast=forecast,
+                    cash_balance=self.cash_balance,
                 )
             )
         finally:
@@ -218,18 +302,20 @@ class ExportWorker(QObject):
         options: ExportOptions,
         result: AnalysisResult,
         file_name: str,
+        language: str = "en",
     ) -> None:
         super().__init__()
         self.target_path = target_path
         self.options = options
         self.result = result
         self.file_name = file_name
+        self.language = language
 
     @Slot()
     def run(self) -> None:
         """Assemble the report model and hand it to the chosen writer."""
         try:
-            self.status_changed.emit(f"Exporting {self.target_path.name}...")
+            self.status_changed.emit(tr("Exporting {name}...", self.language, name=self.target_path.name))
             request = ReportRequest(
                 file_name=self.file_name,
                 depth=self.options.depth,
@@ -242,70 +328,70 @@ class ExportWorker(QObject):
                 self.result.anomalies,
                 request,
                 self.result.forecast,
+                cash_balance=self.result.cash_balance,
             )
             write_report(model, self.target_path, self.options.format_key)
         except ReportExportError as error:
             self.failed.emit(str(error))
         except OSError as error:
             self.failed.emit(
-                f"Could not write {self.target_path.name}. "
-                f"Close it in other applications and try again. ({error})"
+                tr("Could not write {name}. Close it in other applications and try again. ({error})", self.language, name=self.target_path.name, error=error)
             )
         except Exception as error:
-            self.failed.emit(f"Unexpected error while exporting the report: {error}")
+            self.failed.emit(tr("Unexpected error while exporting the report: {error}", self.language, error=error))
         else:
             self.completed.emit(str(self.target_path))
         finally:
             self.finished.emit()
 
 
-def _detection_warning_text(result: ColumnDetectionResult) -> str:
+def _detection_warning_text(result: ColumnDetectionResult, language: str = "en") -> str:
     """Return a short warning for uncertain automatic detection."""
     if result.weak_headers:
-        return "Column names look generic. Please confirm the selected columns."
-    return "Please confirm detected columns before analysis."
+        return tr("Column names look generic. Please confirm the selected columns.", language)
+    return tr("Please confirm detected columns before analysis.", language)
 
 
-def _format_detection_summary(result: ColumnDetectionResult) -> str:
+def _format_detection_summary(result: ColumnDetectionResult, language: str = "en") -> str:
     """Format automatic detection results."""
     lines = []
     for role in COLUMN_ROLES:
         match = result.get(role)
-        label = ROLE_LABELS[role]
+        label = tr(ROLE_LABELS[role], language)
         if match.column_name is None:
-            lines.append(f"{label}: not found")
+            lines.append(f"{label}: {tr('not found', language)}")
         else:
             confidence = int(match.confidence * 100)
             lines.append(f"{label}: {match.column_name} ({confidence}%)")
     return "\n".join(lines)
 
 
-def _format_detection_candidates(result: ColumnDetectionResult) -> str:
+def _format_detection_candidates(result: ColumnDetectionResult, language: str = "en") -> str:
     """Format useful alternative candidates."""
     lines = []
 
     if result.money_candidates:
-        lines.append(f"Money candidates: {_format_candidates(result.money_candidates)}")
+        lines.append(tr("Money candidates: {candidates}", language, candidates=_format_candidates(result.money_candidates, language)))
 
     if result.direction_candidates:
-        lines.append(f"Direction candidates: {_format_candidates(result.direction_candidates)}")
+        lines.append(tr("Direction candidates: {candidates}", language, candidates=_format_candidates(result.direction_candidates, language)))
 
     for role in COLUMN_ROLES:
         if result.get(role).column_name is not None:
             continue
         candidates = result.candidates.get(role, [])
         if candidates:
-            lines.append(f"{ROLE_LABELS[role]} candidates: {_format_candidates(candidates)}")
+            lines.append(tr("{role} candidates: {candidates}", language, role=tr(ROLE_LABELS[role], language), candidates=_format_candidates(candidates, language)))
 
     return "\n".join(lines)
 
 
-def _format_candidates(candidates: list[ColumnCandidate]) -> str:
+def _format_candidates(candidates: list[ColumnCandidate], language: str = "en") -> str:
     """Format column candidates with compact confidence labels."""
     formatted = []
     for candidate in candidates[:5]:
         confidence = int(candidate.confidence * 100)
-        reason = f", {candidate.reason}" if candidate.reason else ""
+        reason = f", {_translate_candidate_reason(candidate.reason, language)}" if candidate.reason else ""
         formatted.append(f"{candidate.column_name} ({confidence}%{reason})")
     return ", ".join(formatted)
 
@@ -340,11 +426,10 @@ def _chart_x_number(value: object) -> float:
         return float(date2num(value))
 
 
-def _format_chart_tooltip(series_key: str, period: object, value: float, grouping: str) -> str:
+def _format_chart_tooltip(series_key: str, period: object, value: float, grouping: str, language: str = "en") -> str:
     """Format hover tooltip text for a chart point."""
     return (
-        f"Date: {_format_chart_period(period, grouping)}\n"
-        f"{CHART_SERIES_LABELS[series_key]}: {_format_chart_hover_value(value)}"
+        tr("Date: {period}\n{series}: {value}", language, period=_format_chart_period(period, grouping), series=tr(CHART_SERIES_LABELS[series_key], language), value=_format_chart_hover_value(value))
     )
 
 
@@ -353,6 +438,7 @@ def _create_chart_hover_state(
     axes: object,
     chart_lines: list[tuple[object, str]],
     grouping: str,
+    language: str = "en",
 ) -> ChartHoverState:
     """Create hidden hover artists for a rendered chart."""
     x_limits = axes.get_xlim()
@@ -435,6 +521,7 @@ def _create_chart_hover_state(
         markers=markers,
         labels=labels,
         date_label=date_label,
+        language=language,
     )
 
 
@@ -488,7 +575,7 @@ def _update_chart_hover(event: object, state: ChartHoverState) -> None:
 
         state.labels[item_index].xy = (x_data[index], y_value)
         state.labels[item_index].set_text(
-            f"{_format_chart_hover_value(y_value)} {CHART_SERIES_LABELS[series_key]}"
+            f"{_format_chart_hover_value(y_value)} {tr(CHART_SERIES_LABELS[series_key], state.language)}"
         )
         state.labels[item_index].set_visible(True)
 
@@ -523,14 +610,16 @@ class ChartDialog(QDialog):
         anomalies: AnomalyDetectionResult | None = None,
         forecast: ForecastResult | None = None,
         parent: QWidget | None = None,
+        language: str = "en",
     ) -> None:
         super().__init__(parent)
+        self.language = language
         self.time_series = time_series
         self.anomalies = anomalies
         self.forecast = forecast
         self.motion_connection: int | None = None
         self.hover_state: ChartHoverState | None = None
-        self.setWindowTitle("Charts")
+        self.setWindowTitle(tr("Charts", self.language))
         self.resize(1280, 800)
         self.setWindowState(Qt.WindowState.WindowMaximized)
         self._setup_ui()
@@ -542,7 +631,7 @@ class ChartDialog(QDialog):
         layout.setSpacing(8)
 
         if Figure is None or FigureCanvas is None:
-            label = QLabel("Install matplotlib to show charts.")
+            label = _ui_widget(QLabel(), "Install matplotlib to show charts.", self.language)
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(label, stretch=1)
             return
@@ -554,11 +643,13 @@ class ChartDialog(QDialog):
         chart_lines = _draw_time_series_chart(self.axes, self.figure, self.time_series)
         draw_forecast(self.axes, self.time_series, self.forecast, chart_lines)
         draw_anomaly_markers(self.axes, self.time_series, self.anomalies)
+        _localize_chart(self.axes, self.time_series, self.language)
         self.hover_state = _create_chart_hover_state(
             self.canvas,
             self.axes,
             chart_lines,
             self.time_series.grouping,
+            self.language,
         )
         self.motion_connection = self.canvas.mpl_connect(
             "motion_notify_event",
@@ -576,15 +667,17 @@ class ColumnSelectionDialog(QDialog):
         detection_result: ColumnDetectionResult,
         selected_columns: SelectedColumns,
         parent: QWidget | None = None,
+        language: str = "en",
     ) -> None:
         super().__init__(parent)
+        self.language = language
         self.column_names = column_names
         self.detection_result = detection_result
         self.role_layouts: dict[str, QVBoxLayout] = {}
         self.role_rows: dict[str, list[tuple[QWidget, QComboBox, QPushButton]]] = {
-            role: [] for role in COLUMN_ROLES
+            role: [] for role in SELECTION_ROLES
         }
-        self.setWindowTitle("Configure Columns")
+        self.setWindowTitle(tr("Configure Columns", self.language))
         self.resize(720, 520)
         self._setup_ui(selected_columns)
 
@@ -594,18 +687,18 @@ class ColumnSelectionDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        title_label = QLabel("Configure Columns")
+        title_label = _ui_widget(QLabel(), "Configure Columns", self.language)
         title_label.setStyleSheet("font-size: 18px; font-weight: 600;")
 
         warning_label = QLabel("")
         warning_label.setWordWrap(True)
         warning_label.setStyleSheet("color: #8a5a00;")
         if self.detection_result.needs_user_confirmation:
-            warning_label.setText(_detection_warning_text(self.detection_result))
+            warning_label.setText(_detection_warning_text(self.detection_result, self.language))
         else:
             warning_label.hide()
 
-        detected_label = QLabel(_format_detection_summary(self.detection_result))
+        detected_label = QLabel(_format_detection_summary(self.detection_result, self.language))
         detected_label.setWordWrap(True)
         detected_label.setStyleSheet("color: #444444;")
 
@@ -618,8 +711,8 @@ class ColumnSelectionDialog(QDialog):
         selector_layout.setHorizontalSpacing(12)
         selector_layout.setVerticalSpacing(10)
 
-        for row_index, role in enumerate(COLUMN_ROLES):
-            label = QLabel(f"{ROLE_LABELS[role]}:")
+        for row_index, role in enumerate(SELECTION_ROLES):
+            label = QLabel(f"{tr(SELECTION_LABELS[role], self.language)}:")
             label.setMinimumWidth(80)
 
             add_button = QPushButton("+")
@@ -653,7 +746,7 @@ class ColumnSelectionDialog(QDialog):
 
         scroll_area.setWidget(selector_widget)
 
-        candidates_text = _format_detection_candidates(self.detection_result)
+        candidates_text = _format_detection_candidates(self.detection_result, self.language)
         candidates_label = QLabel(candidates_text)
         candidates_label.setWordWrap(True)
         candidates_label.setStyleSheet("color: #666666;")
@@ -663,6 +756,8 @@ class ColumnSelectionDialog(QDialog):
         button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        button_box.button(QDialogButtonBox.StandardButton.Ok).setText(tr("OK", self.language))
+        button_box.button(QDialogButtonBox.StandardButton.Cancel).setText(tr("Cancel", self.language))
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
 
@@ -681,7 +776,7 @@ class ColumnSelectionDialog(QDialog):
         row_layout.setSpacing(6)
 
         combo = QComboBox()
-        combo.addItem("Not selected", None)
+        combo.addItem(tr("Not selected", self.language), None)
         for column_name in self.column_names:
             combo.addItem(column_name, column_name)
 
@@ -738,6 +833,7 @@ class ColumnSelectionDialog(QDialog):
             expense=self._selected_role_columns("expense"),
             amount=self._selected_role_columns("amount"),
             category=self._selected_role_columns("category"),
+            description=self._selected_role_columns('description'),
         )
 
     def _selected_role_columns(self, role: str) -> tuple[str, ...]:
@@ -756,9 +852,12 @@ class ColumnSelectionDialog(QDialog):
 class MainWindow(QMainWindow):
     """Main Profilytix window with placeholder areas for future features."""
 
-    def __init__(self) -> None:
+    def __init__(self, language: str | None = None) -> None:
         super().__init__()
         self.settings = QSettings("Profilytix", "Profilytix")
+        self.mapping_profiles = MappingProfiles(self.settings)
+        self._close_pending = False
+        self.language = normalize_language(language or self.settings.value("ui_language", "ru", str))
         self.preview_thread: QThread | None = None
         self.preview_worker: FilePreviewWorker | None = None
         self.analysis_thread: QThread | None = None
@@ -786,6 +885,47 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
 
+    def tr(self, template: str, **values: object) -> str:
+        """Translate application-owned UI text in the selected desktop language."""
+        return tr(template, self.language, **values)
+
+    def set_language(self, language: str) -> None:
+        """Persist the UI choice and update existing widgets and analysis in place."""
+        self.language = normalize_language(language)
+        self.settings.setValue("ui_language", self.language)
+        for widget in self.findChildren(QWidget):
+            template = widget.property("translation_template")
+            if template:
+                widget.setText(self.tr(template, **(widget.property("translation_values") or {})))
+        for combo, labels in ((self.grouping_combo, TIME_GROUPINGS), (self.week_start_combo, {key: value[0] for key, value in WEEK_START_DAYS.items()})):
+            for index in range(combo.count()):
+                combo.setItemText(index, self.tr(labels[combo.itemData(index)]))
+        index = self.language_combo.findData(self.language)
+        if self.language_combo.currentIndex() != index:
+            self.language_combo.setCurrentIndex(index)
+        if self.current_loaded_file is not None:
+            self._update_file_info(self.current_loaded_file)
+            self.detected_columns_label.setText(self._format_selected_columns_summary())
+        if self.current_detection_result is not None:
+            self.detection_warning_label.setText(_detection_warning_text(self.current_detection_result, self.language))
+        result = self.current_analysis_result
+        if result is not None and self.analysis_thread is None:
+            self.current_metrics_text = self._format_analysis_details(result.metrics, result.anomalies, result.time_series.grouping)
+            self.metrics_label.setText(self._format_metrics_compact(result.metrics))
+            self.anomalies_label.setText(self._format_anomalies_compact(result.anomalies, result.time_series.grouping))
+            self._update_chart(result.time_series)
+            self._update_forecast_summary(result)
+        self.analysis_options.set_language(self.language)
+        for worker in (self.preview_worker, self.analysis_worker, self.export_worker):
+            if worker is not None:
+                worker.language = self.language
+        if self.export_worker is not None:
+            _set_ui_text(self.status_label, "Exporting {name}...", self.language, name=self.export_worker.target_path.name)
+        elif self.analysis_worker is not None:
+            _set_ui_text(self.status_label, "Analyzing {name}...", self.language, name=Path(self.analysis_worker.file_path).name)
+        elif self.preview_worker is not None:
+            _set_ui_text(self.status_label, "Loading preview for {name}...", self.language, name=Path(self.preview_worker.file_path).name)
+
     def _setup_ui(self) -> None:
         """Build the initial application layout."""
         central_widget = QWidget(self)
@@ -798,16 +938,25 @@ class MainWindow(QMainWindow):
         title_label.setObjectName("titleLabel")
         title_label.setStyleSheet("font-size: 24px; font-weight: 600;")
 
-        self.load_button = QPushButton("Load Excel/CSV")
+        self.load_button = _ui_widget(QPushButton(), "Load Excel/CSV", self.language)
         self.load_button.setMinimumHeight(36)
         self.load_button.clicked.connect(self._choose_file)
 
         header_layout.addWidget(title_label)
         header_layout.addStretch()
+        self.language_combo = QComboBox()
+        self.language_combo.addItem("Русский", "ru")
+        self.language_combo.addItem("English", "en")
+        self.language_combo.setCurrentIndex(self.language_combo.findData(self.language))
+        self.language_combo.currentIndexChanged.connect(lambda: self.set_language(self.language_combo.currentData()))
+        header_layout.addWidget(self.language_combo)
         header_layout.addWidget(self.load_button)
 
         table_preview_area = self._create_table_preview_area()
-        metrics_area = self._create_analysis_area()
+        metrics_area = QScrollArea()
+        metrics_area.setWidgetResizable(True)
+        metrics_area.setMinimumWidth(340)
+        metrics_area.setWidget(self._create_analysis_area())
         chart_area = self._create_chart_area()
 
         self.content_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -835,9 +984,9 @@ class MainWindow(QMainWindow):
         """Open a file picker and load the selected spreadsheet."""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Load Excel/CSV",
+            tr("Load Excel/CSV", self.language),
             str(self._get_initial_file_directory()),
-            "Data files (*.csv *.xlsx *.xls);;CSV files (*.csv);;Excel files (*.xlsx *.xls)",
+            tr("Data files (*.csv *.xlsx *.xls);;CSV files (*.csv);;Excel files (*.xlsx *.xls)", self.language),
         )
 
         if not file_path:
@@ -847,22 +996,21 @@ class MainWindow(QMainWindow):
 
     def _start_preview_loading(self, file_path: str) -> None:
         """Start loading a file preview in a background thread."""
-        if self.preview_thread is not None:
+        if any(thread is not None for thread in (self.preview_thread, self.analysis_thread, self.export_thread)):
             return
 
         self._set_loading_state(file_path)
 
         self.preview_thread = QThread(self)
-        self.preview_worker = FilePreviewWorker(file_path)
+        self.preview_worker = FilePreviewWorker(file_path, language=self.language)
         self.preview_worker.moveToThread(self.preview_thread)
 
         self.preview_thread.started.connect(self.preview_worker.run)
         self.preview_worker.status_changed.connect(self.status_label.setText)
         self.preview_worker.loaded.connect(self._handle_preview_loaded)
         self.preview_worker.failed.connect(self._handle_preview_failed)
-        self.preview_worker.finished.connect(self.preview_thread.quit)
-        self.preview_worker.finished.connect(self.preview_worker.deleteLater)
-        self.preview_thread.finished.connect(self.preview_thread.deleteLater)
+        self.preview_worker.finished.connect(self.preview_thread.quit, Qt.ConnectionType.DirectConnection)
+        self.preview_thread.finished.connect(self.preview_worker.deleteLater)
         self.preview_thread.finished.connect(self._finish_preview_loading)
 
         self.preview_thread.start()
@@ -875,33 +1023,38 @@ class MainWindow(QMainWindow):
             size_text = f" ({format_file_size(path.stat().st_size)})"
 
         self.load_button.setEnabled(False)
-        self.load_button.setText("Loading...")
+        _set_ui_text(self.load_button, "Loading...", self.language)
         self.configure_columns_button.setEnabled(False)
         self.analyze_button.setEnabled(False)
-        self.status_label.setText(f"Loading preview for {path.name}{size_text}...")
+        _set_ui_text(self.status_label, "Loading preview for {name}{size}...", self.language, name=path.name, size=size_text)
         self.progress_bar.setRange(0, 0)
         self.progress_bar.show()
 
+    @Slot()
     def _finish_preview_loading(self) -> None:
         """Restore controls after the preview worker finishes."""
+        if self.preview_thread is not None:
+            self.preview_thread.wait()
+            self.preview_thread.deleteLater()
         self.load_button.setEnabled(True)
-        self.load_button.setText("Load Excel/CSV")
+        _set_ui_text(self.load_button, "Load Excel/CSV", self.language)
         has_loaded_file = self.current_loaded_file is not None
         self.configure_columns_button.setEnabled(has_loaded_file)
         self.analyze_button.setEnabled(has_loaded_file)
         self.progress_bar.hide()
         self.preview_thread = None
         self.preview_worker = None
+        self._maybe_close()
 
     def _handle_preview_loaded(self, loaded_file: LoadedFile) -> None:
         """Display the loaded preview returned by the worker."""
         self._remember_file_directory(loaded_file.path)
         self._show_loaded_file(loaded_file)
-        self.status_label.setText(f"Preview loaded: {loaded_file.file_name}")
+        _set_ui_text(self.status_label, "Preview loaded: {name}", self.language, name=loaded_file.file_name)
 
     def _handle_preview_failed(self, message: str) -> None:
         """Display a preview loading error returned by the worker."""
-        self.status_label.setText("Could not load preview.")
+        _set_ui_text(self.status_label, "Could not load preview.", self.language)
         self._show_load_error(message)
 
     def _get_initial_file_directory(self) -> Path:
@@ -929,19 +1082,25 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        title_label = QLabel("Table preview")
+        title_label = _ui_widget(QLabel(), "Table preview", self.language)
         title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
 
-        self.file_info_label = QLabel("No file loaded.")
+        self.file_info_label = _ui_widget(QLabel(), "No file loaded.", self.language)
         self.file_info_label.setWordWrap(True)
         self.file_info_label.setStyleSheet("color: #444444;")
 
-        self.status_label = QLabel("Ready.")
+        self.status_label = _ui_widget(QLabel(), "Ready.", self.language)
         self.status_label.setStyleSheet("color: #666666;")
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(False)
         self.progress_bar.hide()
+        self.cancel_button = _ui_widget(QPushButton(), 'Cancel analysis', self.language)
+        self.cancel_button.clicked.connect(self._cancel_analysis)
+        self.cancel_button.hide()
+        self.browse_table_button = _ui_widget(QPushButton(), 'View all rows...', self.language)
+        self.browse_table_button.setEnabled(False)
+        self.browse_table_button.clicked.connect(self._browse_all_rows)
 
         self.table_widget = QTableWidget()
         self.table_widget.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -955,6 +1114,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.file_info_label)
         layout.addWidget(self.status_label)
         layout.addWidget(self.progress_bar)
+        layout.addWidget(self.cancel_button)
+        layout.addWidget(self.browse_table_button)
         layout.addWidget(self.table_widget, stretch=1)
 
         return frame
@@ -987,6 +1148,9 @@ class MainWindow(QMainWindow):
     def _show_loaded_file(self, loaded_file: LoadedFile) -> None:
         """Display loaded file metadata and the first 100 rows."""
         self.current_loaded_file = loaded_file
+        self.browse_table_button.setEnabled(bool(loaded_file.column_names))
+        self.analysis_options.save_button.setEnabled(bool(loaded_file.column_names))
+        self.forecast_label.clear()
         self.current_metrics = None
         self.current_metrics_text = ""
         self.current_time_series = None
@@ -999,30 +1163,28 @@ class MainWindow(QMainWindow):
         self._update_file_info(loaded_file)
         self._update_table_preview(loaded_file.column_names, loaded_file.preview_rows)
         self._update_detected_columns(loaded_file)
-        self.metrics_label.setText("Select one or more columns and click Analyze File.")
+        _set_ui_text(self.metrics_label, "Select one or more columns and click Analyze File.", self.language)
         self.metrics_details_button.hide()
-        self.anomalies_label.setText("Analyze a file to see anomalies.")
+        _set_ui_text(self.anomalies_label, "Analyze a file to see anomalies.", self.language)
         self._set_detected_columns_visible(True)
         self._clear_chart()
         self.analyze_button.setEnabled(True)
 
     def _update_file_info(self, loaded_file: LoadedFile) -> None:
         """Display the loaded file name, shape, columns, and encoding."""
-        columns = ", ".join(loaded_file.column_names) if loaded_file.column_names else "No columns"
-        encoding_text = f"\nCSV encoding: {loaded_file.encoding}" if loaded_file.encoding else ""
-        delimiter_text = f"\nCSV delimiter: {loaded_file.delimiter}" if loaded_file.delimiter else ""
-        reader_text = f"\nReader: {loaded_file.reader}" if loaded_file.reader else ""
-        self.file_info_label.setText(
-            f"File: {loaded_file.file_name}\n"
-            f"Size: {loaded_file.file_size_text}\n"
-            f"Rows: {loaded_file.row_count_text}\n"
-            f"Columns: {loaded_file.column_count}\n"
-            f"Preview rows: {loaded_file.preview_row_count}\n"
-            f"Column names: {columns}"
-            f"{encoding_text}"
-            f"{delimiter_text}"
-            f"{reader_text}"
-        )
+        columns = ", ".join(loaded_file.column_names) if loaded_file.column_names else tr("No columns", self.language)
+        encoding_text = self.tr("\nCSV encoding: {value}", value=loaded_file.encoding) if loaded_file.encoding else ""
+        delimiter_text = self.tr("\nCSV delimiter: {value}", value=loaded_file.delimiter) if loaded_file.delimiter else ""
+        reader_text = self.tr("\nReader: {value}", value=loaded_file.reader) if loaded_file.reader else ""
+        rows = loaded_file.row_count_text
+        if loaded_file.total_rows is None and loaded_file.preview_row_count >= 100:
+            rows = self.tr("{count}+ (fast preview)", count=loaded_file.preview_row_count)
+        self.file_info_label.setText(self.tr(
+            "File: {name}\nSize: {size}\nRows: {rows}\nColumns: {count}\nPreview rows: {preview}\nColumn names: {columns}{encoding}{delimiter}{reader}",
+            name=loaded_file.file_name, size=loaded_file.file_size_text,
+            rows=rows, count=loaded_file.column_count, preview=loaded_file.preview_row_count,
+            columns=columns, encoding=encoding_text, delimiter=delimiter_text, reader=reader_text,
+        ))
 
     def _update_table_preview(self, column_names: list[str], rows: list[list[str]]) -> None:
         """Render preview rows in the table widget."""
@@ -1043,7 +1205,7 @@ class MainWindow(QMainWindow):
 
     def _show_load_error(self, message: str) -> None:
         """Show a user-friendly file loading error."""
-        QMessageBox.warning(self, "Could not load file", message)
+        QMessageBox.warning(self, tr("Could not load file", self.language), message)
 
     def _create_analysis_area(self) -> QFrame:
         """Create the detected columns and metrics area."""
@@ -1056,7 +1218,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        self.detected_columns_title_label = QLabel("Detected columns")
+        self.detected_columns_title_label = _ui_widget(QLabel(), "Detected columns", self.language)
         self.detected_columns_title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
 
         self.detection_warning_label = QLabel("")
@@ -1064,41 +1226,50 @@ class MainWindow(QMainWindow):
         self.detection_warning_label.setStyleSheet("color: #8a5a00;")
         self.detection_warning_label.hide()
 
-        self.detected_columns_label = QLabel("Load a file to detect columns.")
+        self.detected_columns_label = _ui_widget(QLabel(), "Load a file to detect columns.", self.language)
         self.detected_columns_label.setWordWrap(True)
         self.detected_columns_label.setStyleSheet("color: #444444;")
 
-        self.configure_columns_button = QPushButton("Configure Columns...")
+        self.configure_columns_button = _ui_widget(QPushButton(), "Configure Columns...", self.language)
         self.configure_columns_button.setEnabled(False)
         self.configure_columns_button.clicked.connect(self._open_column_selection_dialog)
 
-        metrics_title_label = QLabel("Metrics")
+        metrics_title_label = _ui_widget(QLabel(), "Metrics", self.language)
         metrics_title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
 
-        self.metrics_label = QLabel("Metrics will be calculated in the next step.")
+        self.metrics_label = _ui_widget(QLabel(), "Metrics will be calculated in the next step.", self.language)
         self.metrics_label.setWordWrap(True)
         self.metrics_label.setStyleSheet("color: #666666;")
 
-        self.metrics_details_button = QPushButton("Show Details...")
+        self.metrics_details_button = _ui_widget(QPushButton(), "Show Details...", self.language)
         self.metrics_details_button.clicked.connect(self._show_metrics_details)
         self.metrics_details_button.hide()
 
-        anomalies_title_label = QLabel("Anomalies")
+        anomalies_title_label = _ui_widget(QLabel(), "Anomalies", self.language)
         anomalies_title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
 
-        self.anomalies_label = QLabel("Analyze a file to see anomalies.")
+        self.anomalies_label = _ui_widget(QLabel(), "Analyze a file to see anomalies.", self.language)
         self.anomalies_label.setWordWrap(True)
         self.anomalies_label.setStyleSheet("color: #666666;")
 
-        self.analyze_button = QPushButton("Analyze File")
+        self.analyze_button = _ui_widget(QPushButton(), "Analyze File", self.language)
         self.analyze_button.setEnabled(False)
         self.analyze_button.clicked.connect(self._start_analysis)
+        self.analysis_options = AnalysisOptionsWidget(self, self.language)
+        self.analysis_options.set_profiles(self.mapping_profiles.names())
+        self.analysis_options.save_button.setEnabled(False)
+        self.analysis_options.save_requested.connect(self._save_mapping_profile)
+        self.analysis_options.apply_requested.connect(self._apply_mapping_profile)
+        self.analysis_options.delete_requested.connect(self._delete_mapping_profile)
+        self.forecast_label = QLabel()
+        self.forecast_label.setWordWrap(True)
+        self.forecast_label.setTextFormat(Qt.TextFormat.PlainText)
 
-        self.export_button = QPushButton("Export Report...")
+        self.export_button = _ui_widget(QPushButton(), "Export Report...", self.language)
         self.export_button.clicked.connect(self._start_export)
         self.export_button.hide()
 
-        self.open_report_folder_button = QPushButton("Open Folder")
+        self.open_report_folder_button = _ui_widget(QPushButton(), "Open Folder", self.language)
         self.open_report_folder_button.clicked.connect(self._open_report_folder)
         self.open_report_folder_button.hide()
 
@@ -1113,6 +1284,8 @@ class MainWindow(QMainWindow):
         layout.addSpacing(8)
         layout.addWidget(anomalies_title_label)
         layout.addWidget(self.anomalies_label)
+        layout.addWidget(self.forecast_label)
+        layout.addWidget(self.analysis_options)
         layout.addStretch()
         layout.addWidget(self.export_button)
         layout.addWidget(self.open_report_folder_button)
@@ -1132,20 +1305,20 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
 
         header_layout = QHBoxLayout()
-        title_label = QLabel("Charts")
+        title_label = _ui_widget(QLabel(), "Charts", self.language)
         title_label.setStyleSheet("font-size: 16px; font-weight: 600;")
 
-        grouping_label = QLabel("Group by:")
+        grouping_label = _ui_widget(QLabel(), "Group by:", self.language)
         self.grouping_combo = QComboBox()
         for value, label in TIME_GROUPINGS.items():
-            self.grouping_combo.addItem(label, value)
+            self.grouping_combo.addItem(self.tr(label), value)
         self.grouping_combo.setCurrentIndex(self.grouping_combo.findData("day"))
         self.grouping_combo.currentIndexChanged.connect(self._update_week_start_enabled)
 
-        self.week_start_label = QLabel("Week starts:")
+        self.week_start_label = _ui_widget(QLabel(), "Week starts:", self.language)
         self.week_start_combo = QComboBox()
         for value, (label, _index) in WEEK_START_DAYS.items():
-            self.week_start_combo.addItem(label, value)
+            self.week_start_combo.addItem(self.tr(label), value)
         self.week_start_combo.setCurrentIndex(self.week_start_combo.findData("monday"))
 
         header_layout.addWidget(title_label)
@@ -1155,19 +1328,19 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.week_start_label)
         header_layout.addWidget(self.week_start_combo)
 
-        self.open_chart_button = QPushButton("Open Fullscreen")
+        self.open_chart_button = _ui_widget(QPushButton(), "Open Fullscreen", self.language)
         self.open_chart_button.setEnabled(False)
         self.open_chart_button.clicked.connect(self._open_chart_fullscreen)
         header_layout.addWidget(self.open_chart_button)
 
-        self.chart_message_label = QLabel("Analyze a file to see charts.")
+        self.chart_message_label = _ui_widget(QLabel(), "Analyze a file to see charts.", self.language)
         self.chart_message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.chart_message_label.setStyleSheet("color: #666666;")
 
         layout.addLayout(header_layout)
 
         if Figure is None or FigureCanvas is None:
-            self.chart_message_label.setText("Install matplotlib to show charts.")
+            _set_ui_text(self.chart_message_label, "Install matplotlib to show charts.", self.language)
             layout.addWidget(self.chart_message_label, stretch=1)
         else:
             self.chart_figure = Figure(figsize=(7, 3), tight_layout=True)
@@ -1205,7 +1378,7 @@ class MainWindow(QMainWindow):
         if self.chart_canvas is not None:
             self.chart_canvas.draw_idle()
         self.open_chart_button.setEnabled(False)
-        self.chart_message_label.setText(message)
+        _set_ui_text(self.chart_message_label, message, self.language)
         self.chart_message_label.show()
 
     def _update_chart(self, time_series: TimeSeriesResult) -> None:
@@ -1232,6 +1405,7 @@ class MainWindow(QMainWindow):
         )
         draw_forecast(self.chart_axes, time_series, self.current_forecast, chart_lines)
         draw_anomaly_markers(self.chart_axes, time_series, self.current_anomalies)
+        _localize_chart(self.chart_axes, time_series, self.language)
         self.current_time_series = time_series
         self._connect_chart_tooltip(chart_lines, time_series.grouping)
         self.open_chart_button.setEnabled(True)
@@ -1252,6 +1426,7 @@ class MainWindow(QMainWindow):
             self.chart_axes,
             chart_lines,
             grouping,
+            self.language,
         )
         self.chart_motion_connection = self.chart_canvas.mpl_connect(
             "motion_notify_event",
@@ -1280,6 +1455,7 @@ class MainWindow(QMainWindow):
             self.current_anomalies,
             self.current_forecast,
             self,
+            language=self.language,
         )
         dialog.exec()
 
@@ -1299,7 +1475,7 @@ class MainWindow(QMainWindow):
             self.detection_warning_label.hide()
             return
 
-        self.detection_warning_label.setText(_detection_warning_text(result))
+        self.detection_warning_label.setText(_detection_warning_text(result, self.language))
         self.detection_warning_label.show()
 
     def _selected_columns_from_detection(
@@ -1316,13 +1492,13 @@ class MainWindow(QMainWindow):
     def _format_selected_columns_summary(self) -> str:
         """Format currently selected columns for the compact right panel."""
         lines = []
-        for role in COLUMN_ROLES:
+        for role in SELECTION_ROLES:
             selected = getattr(self.selected_columns, role)
-            label = ROLE_LABELS[role]
+            label = self.tr(SELECTION_LABELS[role])
             if selected:
                 lines.append(f"{label}: {', '.join(selected)}")
             else:
-                lines.append(f"{label}: not selected")
+                lines.append(f"{label}: {self.tr('not selected')}")
         return "\n".join(lines)
 
     def _open_column_selection_dialog(self) -> None:
@@ -1335,31 +1511,38 @@ class MainWindow(QMainWindow):
             self.current_detection_result,
             self.selected_columns,
             self,
+            language=self.language,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         self.selected_columns = dialog.selected_columns()
         self.detected_columns_label.setText(self._format_selected_columns_summary())
-        self.metrics_label.setText("Selected columns updated. Click Analyze File.")
+        self._invalidate_analysis()
+        _set_ui_text(self.metrics_label, "Selected columns updated. Click Analyze File.", self.language)
         self.metrics_details_button.hide()
         self.current_metrics = None
         self.current_metrics_text = ""
         self.current_anomalies = None
-        self.anomalies_label.setText("Analyze a file to see anomalies.")
+        _set_ui_text(self.anomalies_label, "Analyze a file to see anomalies.", self.language)
         self._set_detected_columns_visible(True)
         self._clear_chart()
 
     def _start_analysis(self) -> None:
         """Start full-file metric analysis using selected optional columns."""
-        if self.analysis_thread is not None or self.current_loaded_file is None:
+        if self.analysis_thread is not None or self.preview_thread is not None or self.export_thread is not None or self.current_loaded_file is None:
             return
 
         selected_columns = self._get_selected_columns()
         if not selected_columns.has_money_column:
-            self._show_load_error("Select at least a Revenue, Expenses, or Amount column before analysis.")
+            self._show_load_error(tr("Select at least a Revenue, Expenses, or Amount column before analysis.", self.language))
             return
 
+        try:
+            cash_balance = self.analysis_options.cash_balance()
+        except ValueError as error:
+            self._show_load_error(str(error))
+            return
         self._set_analysis_state(True)
 
         self.analysis_thread = QThread(self)
@@ -1368,6 +1551,9 @@ class MainWindow(QMainWindow):
             selected_columns,
             self._current_time_grouping(),
             self._current_week_start(),
+            language=self.language,
+            cash_balance=cash_balance,
+            anomaly_method=self.analysis_options.anomaly_method(),
         )
         self.analysis_worker.moveToThread(self.analysis_thread)
 
@@ -1375,9 +1561,10 @@ class MainWindow(QMainWindow):
         self.analysis_worker.status_changed.connect(self.status_label.setText)
         self.analysis_worker.completed.connect(self._handle_analysis_completed)
         self.analysis_worker.failed.connect(self._handle_analysis_failed)
-        self.analysis_worker.finished.connect(self.analysis_thread.quit)
-        self.analysis_worker.finished.connect(self.analysis_worker.deleteLater)
-        self.analysis_thread.finished.connect(self.analysis_thread.deleteLater)
+        self.analysis_worker.cancelled.connect(self._handle_analysis_cancelled)
+        self.analysis_worker.progress_changed.connect(self._handle_analysis_progress)
+        self.analysis_worker.finished.connect(self.analysis_thread.quit, Qt.ConnectionType.DirectConnection)
+        self.analysis_thread.finished.connect(self.analysis_worker.deleteLater)
         self.analysis_thread.finished.connect(self._finish_analysis)
 
         self.analysis_thread.start()
@@ -1392,7 +1579,7 @@ class MainWindow(QMainWindow):
         result = self.current_analysis_result
         has_chart = bool(result.time_series.points and result.time_series.visible_series)
 
-        dialog = ExportDialog(self, has_chart=has_chart, initial=self.last_export_options)
+        dialog = ExportDialog(self, has_chart=has_chart, initial=self.last_export_options, language=self.language)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -1405,9 +1592,9 @@ class MainWindow(QMainWindow):
 
         target_text, _selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Save Report",
+            tr("Save Report", self.language),
             str(suggested),
-            report_format.file_filter,
+            f"{self.tr(report_format.label)} (*{report_format.extension})",
         )
         if not target_text:
             return
@@ -1425,6 +1612,7 @@ class MainWindow(QMainWindow):
             options,
             result,
             source_path.name,
+            language=self.language,
         )
         self.export_worker.moveToThread(self.export_thread)
 
@@ -1432,9 +1620,8 @@ class MainWindow(QMainWindow):
         self.export_worker.status_changed.connect(self.status_label.setText)
         self.export_worker.completed.connect(self._handle_export_completed)
         self.export_worker.failed.connect(self._handle_export_failed)
-        self.export_worker.finished.connect(self.export_thread.quit)
-        self.export_worker.finished.connect(self.export_worker.deleteLater)
-        self.export_thread.finished.connect(self.export_thread.deleteLater)
+        self.export_worker.finished.connect(self.export_thread.quit, Qt.ConnectionType.DirectConnection)
+        self.export_thread.finished.connect(self.export_worker.deleteLater)
         self.export_thread.finished.connect(self._finish_export)
 
         self.export_thread.start()
@@ -1442,27 +1629,36 @@ class MainWindow(QMainWindow):
     def _set_export_state(self, is_running: bool) -> None:
         """Show that an export is in progress."""
         self.export_button.setEnabled(not is_running)
-        self.export_button.setText("Exporting..." if is_running else "Export Report...")
+        self.load_button.setEnabled(not is_running)
+        self.analyze_button.setEnabled(not is_running and self.current_loaded_file is not None)
+        self.configure_columns_button.setEnabled(not is_running and self.current_loaded_file is not None)
+        self.analysis_options.setEnabled(not is_running)
+        _set_ui_text(self.export_button, "Exporting..." if is_running else "Export Report...", self.language)
         if is_running:
             self.open_report_folder_button.hide()
 
+    @Slot()
     def _finish_export(self) -> None:
         """Release the export thread."""
+        if self.export_thread is not None:
+            self.export_thread.wait()
+            self.export_thread.deleteLater()
         self.export_thread = None
         self.export_worker = None
         self._set_export_state(False)
+        self._maybe_close()
 
     def _handle_export_completed(self, target_path: str) -> None:
         """Report a written file and offer to reveal it."""
         self.last_export_path = Path(target_path)
-        self.status_label.setText(f"Report saved to {target_path}")
+        _set_ui_text(self.status_label, "Report saved to {path}", self.language, path=target_path)
         self.open_report_folder_button.show()
 
     def _handle_export_failed(self, message: str) -> None:
         """Report an export failure without taking the window down."""
-        self.status_label.setText("Export failed.")
+        _set_ui_text(self.status_label, "Export failed.", self.language)
         self.open_report_folder_button.hide()
-        QMessageBox.warning(self, "Export failed", message)
+        QMessageBox.warning(self, tr("Export failed", self.language), message)
 
     def _open_report_folder(self) -> None:
         """Open the folder holding the most recent report."""
@@ -1475,9 +1671,133 @@ class MainWindow(QMainWindow):
         """Return currently selected columns."""
         return self.selected_columns
 
+    def _browse_all_rows(self) -> None:
+        if self.current_loaded_file is not None:
+            TableBrowserDialog(self.current_loaded_file.path, self, self.language).exec()
+
+    def _save_mapping_profile(self) -> None:
+        name, accepted = QInputDialog.getText(self, self.tr('Save column mapping'), self.tr('Profile name:'))
+        if not accepted:
+            return
+        try:
+            self.mapping_profiles.save(name, self.selected_columns)
+        except ValueError as error:
+            self._show_load_error(self.tr(str(error)))
+            return
+        self.analysis_options.set_profiles(self.mapping_profiles.names())
+        self.analysis_options.profile_combo.setCurrentText(name.strip())
+        _set_ui_text(self.status_label, 'Column mapping saved.', self.language)
+
+    def _apply_mapping_profile(self, name: str) -> None:
+        if self.current_loaded_file is None:
+            return
+        try:
+            selected = self.mapping_profiles.load(name, self.available_column_names)
+        except MissingProfileColumns as error:
+            self._show_load_error(self.tr('Missing columns: {columns}', columns=', '.join(error.columns)))
+            return
+        except ValueError as error:
+            self._show_load_error(self.tr(str(error)))
+            return
+        self.selected_columns = selected
+        self.detected_columns_label.setText(self._format_selected_columns_summary())
+        self._invalidate_analysis()
+        _set_ui_text(self.status_label, 'Column mapping applied. Analyze the file again.', self.language)
+
+    def _delete_mapping_profile(self, name: str) -> None:
+        self.mapping_profiles.delete(name)
+        self.analysis_options.set_profiles(self.mapping_profiles.names())
+
+    def _invalidate_analysis(self) -> None:
+        """A new mapping cannot leave an export button for old results behind."""
+        self.current_analysis_result = None
+        self.current_metrics = None
+        self.current_metrics_text = ''
+        self.current_anomalies = None
+        self.current_forecast = None
+        self.metrics_details_button.hide()
+        self.export_button.hide()
+        self.open_report_folder_button.hide()
+        self.forecast_label.clear()
+        _set_ui_text(self.metrics_label, 'Selected columns updated. Click Analyze File.', self.language)
+        _set_ui_text(self.anomalies_label, 'Analyze a file to see anomalies.', self.language)
+        self._set_detected_columns_visible(True)
+        self._clear_chart()
+
+    def _cancel_analysis(self) -> None:
+        if self.analysis_worker is not None:
+            self.analysis_worker.cancel()
+            self.cancel_button.setEnabled(False)
+            _set_ui_text(self.status_label, 'Cancelling analysis...', self.language)
+
+    def _handle_analysis_cancelled(self) -> None:
+        if self.current_analysis_result is not None:
+            self._handle_analysis_completed(self.current_analysis_result)
+        else:
+            self._invalidate_analysis()
+        _set_ui_text(self.status_label, 'Analysis cancelled.', self.language)
+
+    def _handle_analysis_progress(self, done: int, total: int, unit: str) -> None:
+        if total > 0:
+            self.progress_bar.setRange(0, 1000)
+            self.progress_bar.setValue(min(1000, round(done / total * 1000)))
+        else:
+            self.progress_bar.setRange(0, 0)
+        if unit == 'bytes':
+            _set_ui_text(self.status_label, 'Read {done} / {total}', self.language, done=format_file_size(done), total=format_file_size(total))
+        else:
+            _set_ui_text(self.status_label, 'Read rows: {done} / {total}', self.language, done=format_number(done), total=format_number(total))
+
+    def _forecast_text(self, result: AnalysisResult) -> str:
+        lines = []
+        forecast = result.forecast
+        if forecast is not None and forecast.has_forecast:
+            lines.append(self.tr('Forecast for the next period:'))
+            for item in forecast.forecasts:
+                if item.points:
+                    point = item.points[0]
+                    lines.append(f'{series_label(self.language, item.series_key)} ({_format_chart_period(point.period, result.time_series.grouping)}): {format_money(point.value)}')
+        elif forecast is not None:
+            lines.append(self.tr('Forecast requires at least six valid periods.'))
+        cash = calculate_cash_flow(result.metrics, result.cash_balance)
+        if cash.cash_balance is not None:
+            lines.append(f"{report_label(self.language, 'metric_cash_balance')}: {format_money(cash.cash_balance)}")
+            if cash.runway_days is not None:
+                lines.append(f"{report_label(self.language, 'metric_runway')}: {format_number(cash.runway_days)}")
+            elif cash.daily_net_burn == 0:
+                lines.append(self.tr('No cash depletion at the historical average.'))
+            if cash.projected_balance_30_days is not None:
+                lines.append(f"{report_label(self.language, 'metric_balance_30_days')}: {format_money(cash.projected_balance_30_days)}")
+            if cash.daily_net_burn is None:
+                lines.append(self.tr('Cash runway requires all money rows to have valid dates.') if result.metrics.undated_money_rows else self.tr('Cash runway requires dated revenue and expenses.'))
+        if lines:
+            lines.append(self.tr('Estimates use historical data; future results may differ.'))
+        return '\n'.join(lines)
+
+    def _update_forecast_summary(self, result: AnalysisResult) -> None:
+        self.forecast_label.setText(self._forecast_text(result))
+
+    def closeEvent(self, event) -> None:
+        if any(thread is not None for thread in (self.preview_thread, self.analysis_thread, self.export_thread)):
+            self._close_pending = True
+            self._cancel_analysis()
+            _set_ui_text(self.status_label, 'Waiting for background work to finish...', self.language)
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _maybe_close(self) -> None:
+        if self._close_pending and all(thread is None for thread in (self.preview_thread, self.analysis_thread, self.export_thread)):
+            QTimer.singleShot(0, self.close)
+
     def _set_analysis_state(self, is_running: bool) -> None:
         """Update controls while analysis is running."""
         self.analyze_button.setEnabled(not is_running)
+        self.analysis_options.setEnabled(not is_running)
+        self.browse_table_button.setEnabled(not is_running and self.current_loaded_file is not None)
+        self.cancel_button.setVisible(is_running)
+        self.cancel_button.setEnabled(is_running)
+        self.export_button.setEnabled(not is_running)
         self.load_button.setEnabled(not is_running)
         self.configure_columns_button.setEnabled(
             not is_running and self.current_loaded_file is not None
@@ -1487,20 +1807,25 @@ class MainWindow(QMainWindow):
             not is_running and self._current_time_grouping() == "week"
         )
         if is_running:
-            self.analyze_button.setText("Analyzing...")
-            self.metrics_label.setText("Analyzing selected columns...")
-            self.anomalies_label.setText("Looking for unusual periods...")
+            _set_ui_text(self.analyze_button, "Analyzing...", self.language)
+            _set_ui_text(self.metrics_label, "Analyzing selected columns...", self.language)
+            _set_ui_text(self.anomalies_label, "Looking for unusual periods...", self.language)
             self.progress_bar.setRange(0, 0)
             self.progress_bar.show()
         else:
-            self.analyze_button.setText("Analyze File")
+            _set_ui_text(self.analyze_button, "Analyze File", self.language)
             self.progress_bar.hide()
 
+    @Slot()
     def _finish_analysis(self) -> None:
         """Restore controls after analysis finishes."""
+        if self.analysis_thread is not None:
+            self.analysis_thread.wait()
+            self.analysis_thread.deleteLater()
         self.analysis_thread = None
         self.analysis_worker = None
         self._set_analysis_state(False)
+        self._maybe_close()
 
     def _handle_analysis_completed(self, result: AnalysisResult) -> None:
         """Display calculated metrics."""
@@ -1508,6 +1833,7 @@ class MainWindow(QMainWindow):
         self.current_anomalies = result.anomalies
         self.current_forecast = result.forecast
         self.current_analysis_result = result
+        self._update_forecast_summary(result)
         self.current_metrics_text = self._format_analysis_details(
             result.metrics,
             result.anomalies,
@@ -1521,17 +1847,18 @@ class MainWindow(QMainWindow):
         self.export_button.show()
         self._set_detected_columns_visible(False)
         self._update_chart(result.time_series)
-        self.status_label.setText("Analysis complete.")
+        _set_ui_text(self.status_label, "Analysis complete.", self.language)
 
     def _handle_analysis_failed(self, message: str) -> None:
         """Display an analysis error."""
-        self.metrics_label.setText("Analysis failed.")
-        self.anomalies_label.setText("Anomaly detection failed.")
+        self._invalidate_analysis()
+        _set_ui_text(self.metrics_label, "Analysis failed.", self.language)
+        _set_ui_text(self.anomalies_label, "Anomaly detection failed.", self.language)
         self.metrics_details_button.hide()
         self.export_button.hide()
         self.open_report_folder_button.hide()
         self.current_analysis_result = None
-        self.status_label.setText("Analysis failed.")
+        _set_ui_text(self.status_label, "Analysis failed.", self.language)
         self._show_load_error(message)
 
     def _set_detected_columns_visible(self, is_visible: bool) -> None:
@@ -1550,7 +1877,7 @@ class MainWindow(QMainWindow):
         if not self.current_metrics_text:
             return
 
-        QMessageBox.information(self, "Analysis Details", self.current_metrics_text)
+        QMessageBox.information(self, tr("Analysis Details", self.language), self.current_metrics_text)
 
     def _format_analysis_details(
         self,
@@ -1560,11 +1887,13 @@ class MainWindow(QMainWindow):
     ) -> str:
         """Format full metrics and anomaly details."""
         sections = [self._format_metrics(metrics), self._format_anomalies_details(anomalies, grouping)]
+        if self.current_analysis_result is not None:
+            sections.append(self._forecast_text(self.current_analysis_result))
         return "\n\n".join(section for section in sections if section)
 
     def _format_metrics_compact(self, metrics: BasicMetrics) -> str:
         """Format only the highest-signal metrics for the compact panel."""
-        lines = [f"Transactions: {format_number(metrics.transaction_count)}"]
+        lines = [self.tr("Transactions: {value}", value=self.tr(format_number(metrics.transaction_count)))]
 
         amount_only = (
             bool(self.selected_columns.amount)
@@ -1572,54 +1901,59 @@ class MainWindow(QMainWindow):
             and not self.selected_columns.expense
         )
         if amount_only:
-            lines.append(f"Amount: {format_money(metrics.total_profit)}")
+            lines.append(self.tr("Amount: {value}", value=self.tr(format_money(metrics.total_profit))))
         else:
             if metrics.total_profit is not None:
-                lines.append(f"Profit: {format_money(metrics.total_profit)}")
+                lines.append(self.tr("Profit: {value}", value=self.tr(format_money(metrics.total_profit))))
             elif metrics.total_revenue is not None:
-                lines.append(f"Revenue: {format_money(metrics.total_revenue)}")
+                lines.append(self.tr("Revenue: {value}", value=self.tr(format_money(metrics.total_revenue))))
             elif metrics.total_expenses is not None:
-                lines.append(f"Expenses: {format_money(metrics.total_expenses)}")
+                lines.append(self.tr("Expenses: {value}", value=self.tr(format_money(metrics.total_expenses))))
 
         if metrics.date_min is not None and metrics.date_max is not None:
-            lines.append(f"Period: {metrics.date_min:%Y-%m-%d} - {metrics.date_max:%Y-%m-%d}")
+            lines.append(self.tr("Period: {start} - {end}", start=f"{metrics.date_min:%Y-%m-%d}", end=f"{metrics.date_max:%Y-%m-%d}"))
 
         return "\n".join(lines[:3])
 
     def _format_metrics(self, metrics: BasicMetrics) -> str:
         """Format metrics for the right panel."""
         lines = [
-            f"Transactions: {format_number(metrics.transaction_count)}",
-            f"Revenue fields: {format_number(metrics.revenue_column_count)}",
-            f"Revenue: {format_money(metrics.total_revenue)}",
-            f"Expense fields: {format_number(metrics.expense_column_count)}",
-            f"Expenses: {format_money(metrics.total_expenses)}",
-            f"Amount fields: {format_number(metrics.amount_column_count)}",
-            f"Category fields: {format_number(metrics.category_column_count)}",
-            f"Profit: {format_money(metrics.total_profit)}",
-            f"Average revenue: {format_money(metrics.average_revenue)}",
-            f"Average expense: {format_money(metrics.average_expense)}",
+            self.tr("Transactions: {value}", value=self.tr(format_number(metrics.transaction_count))),
+            self.tr("Revenue fields: {value}", value=self.tr(format_number(metrics.revenue_column_count))),
+            self.tr("Revenue: {value}", value=self.tr(format_money(metrics.total_revenue))),
+            self.tr("Expense fields: {value}", value=self.tr(format_number(metrics.expense_column_count))),
+            self.tr("Expenses: {value}", value=self.tr(format_money(metrics.total_expenses))),
+            self.tr("Amount fields: {value}", value=self.tr(format_number(metrics.amount_column_count))),
+            self.tr("Category fields: {value}", value=self.tr(format_number(metrics.category_column_count))),
+            self.tr("Profit: {value}", value=self.tr(format_money(metrics.total_profit))),
+            self.tr("Average revenue: {value}", value=self.tr(format_money(metrics.average_revenue))),
+            self.tr("Average expense: {value}", value=self.tr(format_money(metrics.average_expense))),
         ]
 
         if metrics.date_min is not None and metrics.date_max is not None:
             lines.extend(
                 [
-                    f"Period: {metrics.date_min:%Y-%m-%d} - {metrics.date_max:%Y-%m-%d}",
-                    f"Period days: {format_number(metrics.period_days)}",
-                    f"Average daily revenue: {format_money(metrics.average_daily_revenue)}",
-                    f"Average daily expense: {format_money(metrics.average_daily_expense)}",
-                    f"Average daily profit: {format_money(metrics.average_daily_profit)}",
+                    self.tr("Period: {start} - {end}", start=f"{metrics.date_min:%Y-%m-%d}", end=f"{metrics.date_max:%Y-%m-%d}"),
+                    self.tr("Period days: {value}", value=self.tr(format_number(metrics.period_days))),
+                    self.tr("Average daily revenue: {value}", value=self.tr(format_money(metrics.average_daily_revenue))),
+                    self.tr("Average daily expense: {value}", value=self.tr(format_money(metrics.average_daily_expense))),
+                    self.tr("Average daily profit: {value}", value=self.tr(format_money(metrics.average_daily_profit))),
                 ]
             )
 
         if metrics.top_categories:
             lines.append("")
-            lines.append("Top categories by profit:")
+            lines.append(tr("Top categories by profit:", self.language))
             for category in metrics.top_categories[:UI_CATEGORY_LIMIT]:
                 lines.append(
-                    f"{category.name}: {format_money(category.profit)} "
-                    f"({format_number(category.transaction_count)} tx)"
+                    self.tr("{category}: {profit} ({count} tx)", category=category.name, profit=self.tr(format_money(category.profit)), count=format_number(category.transaction_count))
                 )
+
+        if metrics.derived_categories:
+            lines.extend(['', report_label(self.language, 'section_derived_categories') + ':'])
+            for category in metrics.derived_categories:
+                name = report_label(self.language, 'category_' + category.name)
+                lines.append(self.tr('{category}: {profit} ({count} tx)', category=name, profit=format_money(category.profit), count=format_number(category.transaction_count)))
 
         return "\n".join(lines)
 
@@ -1630,16 +1964,16 @@ class MainWindow(QMainWindow):
     ) -> str:
         """Format a compact anomaly summary for the right panel."""
         if not result.has_anomalies:
-            return result.message
+            return self.tr(result.message)
 
         lines = [
-            f"{format_number(result.total_found)} {_pluralize_anomaly(result.total_found)} found."
+            self.tr("{count} {noun} found.", count=format_number(result.total_found), noun=_pluralize_anomaly(result.total_found, self.language))
         ]
         for anomaly in result.anomalies[:3]:
             lines.append(self._format_anomaly_short(anomaly, grouping))
 
         if result.total_found > len(result.anomalies[:3]):
-            lines.append("Open details to see more.")
+            lines.append(tr("Open details to see more.", self.language))
 
         return "\n".join(lines)
 
@@ -1650,19 +1984,18 @@ class MainWindow(QMainWindow):
     ) -> str:
         """Format detailed anomaly text for the details dialog."""
         if not result.has_anomalies:
-            return f"Anomalies:\n{result.message}"
+            return self.tr("Anomalies:\n{message}", message=self.tr(result.message))
 
         lines = [
-            f"Anomalies: {format_number(result.total_found)} "
-            f"{_pluralize_anomaly(result.total_found)} found"
+            self.tr("Anomalies: {count} {noun} found", count=format_number(result.total_found), noun=_pluralize_anomaly(result.total_found, self.language))
         ]
         for anomaly in result.anomalies:
             period = _format_chart_period(anomaly.period, grouping)
             lines.append(
-                f"{anomaly.severity}: {anomaly.series_label} {anomaly.kind} on {period}: "
-                f"{format_money(anomaly.value)} "
-                f"(usual {format_money(anomaly.baseline)}, rule: {anomaly.rule})"
+                self.tr("{severity}: {series} {kind} on {period}: {value} (usual {baseline}, rule: {rule})", severity=self.tr(anomaly.severity), series=self.tr(CHART_SERIES_LABELS[anomaly.series_key]), kind=self.tr(anomaly.kind), period=period, value=self.tr(format_money(anomaly.value)), baseline=self.tr(format_money(anomaly.baseline)), rule=anomaly.rule)
             )
+            if anomaly.category:
+                lines.append(self.tr('Largest category change: {category}', category=anomaly.category))
 
         return "\n".join(lines)
 
@@ -1670,11 +2003,13 @@ class MainWindow(QMainWindow):
         """Format one anomaly for the compact panel."""
         period = _format_chart_period(anomaly.period, grouping)
         return (
-            f"{period}: {anomaly.series_label} {anomaly.kind} "
-            f"({format_money(anomaly.value)})"
+            f"{period}: {self.tr(CHART_SERIES_LABELS[anomaly.series_key])} {self.tr(anomaly.kind)} "
+            f"({self.tr(format_money(anomaly.value))})"
         )
 
 
-def _pluralize_anomaly(count: int) -> str:
+def _pluralize_anomaly(count: int, language: str = "en") -> str:
     """Return an English singular or plural label for anomalies."""
+    if language == "ru":
+        return "аномалия" if count % 10 == 1 and count % 100 != 11 else "аномалии" if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14) else "аномалий"
     return "anomaly" if count == 1 else "anomalies"

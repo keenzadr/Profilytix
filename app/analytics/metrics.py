@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +19,7 @@ class SelectedColumns:
     expense: object = ()
     amount: object = ()
     category: object = ()
+    description: object = ()
 
     def __post_init__(self) -> None:
         """Normalize single-value and multi-value selections."""
@@ -27,6 +28,7 @@ class SelectedColumns:
         object.__setattr__(self, "expense", _normalize_selected_columns(self.expense))
         object.__setattr__(self, "amount", _normalize_selected_columns(self.amount))
         object.__setattr__(self, "category", _normalize_selected_columns(self.category))
+        object.__setattr__(self, "description", _normalize_selected_columns(self.description))
 
     @property
     def has_money_column(self) -> bool:
@@ -66,6 +68,8 @@ class BasicMetrics:
     average_daily_expense: float | None = None
     average_daily_profit: float | None = None
     top_categories: tuple[CategoryMetric, ...] = ()
+    derived_categories: tuple[CategoryMetric, ...] = ()
+    undated_money_rows: int = 0
 
 
 @dataclass(frozen=True)
@@ -82,6 +86,7 @@ class PreparedFinancialData:
     expense_column_count: int
     amount_column_count: int
     category_column_count: int
+    derived_categories: pd.Series | None = None
 
 
 def calculate_basic_metrics(data: pd.DataFrame, selected_columns: SelectedColumns) -> BasicMetrics:
@@ -107,6 +112,15 @@ def prepare_financial_data(
     expenses = _add_optional_series(expenses, amount_expenses)
     dates = _first_valid_date_column(data, selected_columns.date)
     categories = _combined_category_columns(data, category_columns)
+    description_columns = _existing_columns(data, selected_columns.description)
+    derived_categories = None
+    if description_columns:
+        from app.ml.categorization import categorize_descriptions
+
+        descriptions = data[description_columns[0]].fillna("").astype(str)
+        for column in description_columns[1:]:
+            descriptions = descriptions.str.cat(data[column].fillna("").astype(str), sep=" ")
+        derived_categories = categorize_descriptions(descriptions)
 
     return PreparedFinancialData(
         transaction_count=len(data),
@@ -119,12 +133,13 @@ def prepare_financial_data(
         expense_column_count=len(expense_columns),
         amount_column_count=len(amount_columns),
         category_column_count=len(category_columns),
+        derived_categories=derived_categories,
     )
 
 
 def calculate_basic_metrics_from_prepared(
     prepared: PreparedFinancialData,
-    category_limit: int = 5,
+    category_limit: int | None = 5,
 ) -> BasicMetrics:
     """Calculate basic metrics from already cleaned financial data.
 
@@ -145,6 +160,14 @@ def calculate_basic_metrics_from_prepared(
             date_min = _to_python_datetime(valid_dates.min())
             date_max = _to_python_datetime(valid_dates.max())
 
+    undated_money_rows = 0
+    if prepared.dates is not None:
+        money_rows = pd.Series(False, index=prepared.dates.index)
+        for values in (prepared.revenue, prepared.expenses, prepared.amount):
+            if values is not None:
+                money_rows |= values.fillna(0).ne(0)
+        undated_money_rows = int((prepared.dates.isna() & money_rows).sum())
+
     return build_basic_metrics(
         transaction_count=prepared.transaction_count,
         total_revenue=total_revenue,
@@ -156,6 +179,11 @@ def calculate_basic_metrics_from_prepared(
         date_min=date_min,
         date_max=date_max,
         top_categories=_calculate_top_categories(prepared, category_limit),
+        undated_money_rows=undated_money_rows,
+        derived_categories=(
+            _calculate_top_categories(replace(prepared, categories=prepared.derived_categories), category_limit)
+            if prepared.derived_categories is not None else ()
+        ),
     )
 
 
@@ -171,6 +199,8 @@ def build_basic_metrics(
     date_min: datetime | None = None,
     date_max: datetime | None = None,
     top_categories: tuple[CategoryMetric, ...] = (),
+    derived_categories: tuple[CategoryMetric, ...] = (),
+    undated_money_rows: int = 0,
 ) -> BasicMetrics:
     """Build derived metrics from pre-aggregated totals."""
     total_profit = _subtract_optional(total_revenue, total_expenses)
@@ -216,6 +246,8 @@ def build_basic_metrics(
         average_daily_expense=average_daily_expense,
         average_daily_profit=average_daily_profit,
         top_categories=top_categories,
+        derived_categories=derived_categories,
+        undated_money_rows=undated_money_rows,
     )
 
 
@@ -403,7 +435,7 @@ def _clean_category_value(value: object) -> str:
 
 def _calculate_top_categories(
     prepared: PreparedFinancialData,
-    limit: int = 5,
+    limit: int | None = 5,
 ) -> tuple[CategoryMetric, ...]:
     """Calculate a compact category breakdown."""
     if prepared.categories is None:

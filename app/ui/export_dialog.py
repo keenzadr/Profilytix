@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from app.reports.builder import DEPTH_BRIEF, DEPTH_DETAILED
 from app.reports.writers import WRITERS
+from app.ui.strings import tr
 
 
 DEPTH_CHOICES = (
@@ -54,10 +55,12 @@ class ExportDialog(QDialog):
         parent: QWidget | None = None,
         has_chart: bool = True,
         initial: ExportOptions | None = None,
+        language: str = "en",
     ) -> None:
         super().__init__(parent)
         self.has_chart = has_chart
-        self.setWindowTitle("Export Report")
+        self.language = language
+        self.setWindowTitle(tr("Export Report", self.language))
         self.setMinimumWidth(420)
         self._setup_ui(initial or ExportOptions("pdf", DEPTH_BRIEF, "ru"))
 
@@ -71,16 +74,16 @@ class ExportDialog(QDialog):
         self.format_combo = QComboBox(self)
         for key in FORMAT_ORDER:
             report_format = WRITERS[key]
-            text = report_format.label
+            text = tr(report_format.label, self.language)
             if report_format.needs_chart and not self.has_chart:
-                text = f"{text} - needs a date column"
+                text = tr("{format} - needs a date column", self.language, format=text)
             self.format_combo.addItem(text, key)
 
         index = self.format_combo.findData(initial.format_key)
         if index >= 0:
             self.format_combo.setCurrentIndex(index)
         self._disable_formats_without_chart()
-        form.addRow("Format:", self.format_combo)
+        form.addRow(tr("Format:", self.language), self.format_combo)
         layout.addLayout(form)
 
         layout.addWidget(self._build_depth_group(initial.depth))
@@ -90,19 +93,21 @@ class ExportDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             parent=self,
         )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(tr("OK", self.language))
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr("Cancel", self.language))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
     def _build_depth_group(self, selected_depth: str) -> QGroupBox:
         """Build the brief/detailed selector."""
-        group = QGroupBox("Detail level", self)
+        group = QGroupBox(tr("Detail level", self.language), self)
         group_layout = QVBoxLayout(group)
         self.depth_buttons = QButtonGroup(self)
 
         for key, title, explanation in DEPTH_CHOICES:
-            button = QRadioButton(title, group)
-            button.setToolTip(explanation)
+            button = QRadioButton(tr(title, self.language), group)
+            button.setToolTip(tr(explanation, self.language))
             button.setChecked(key == selected_depth)
             self.depth_buttons.addButton(button)
             button.setProperty("depth_key", key)
@@ -112,12 +117,12 @@ class ExportDialog(QDialog):
 
     def _build_language_group(self, selected_language: str) -> QGroupBox:
         """Build the report language selector."""
-        group = QGroupBox("Report language", self)
+        group = QGroupBox(tr("Report language", self.language), self)
         group_layout = QVBoxLayout(group)
         self.language_buttons = QButtonGroup(self)
 
         for key, title in LANGUAGE_CHOICES:
-            button = QRadioButton(title, group)
+            button = QRadioButton(tr(title, self.language), group)
             button.setChecked(key == selected_language)
             self.language_buttons.addButton(button)
             button.setProperty("language_key", key)
